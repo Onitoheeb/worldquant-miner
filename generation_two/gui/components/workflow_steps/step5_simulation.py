@@ -479,16 +479,12 @@ class Step5Simulation:
                                     else:
                                         self._log_to_slot(primary_slot_id, "✅ Ollama selection completed, all placeholders replaced")
                                 else:
-                                    self._log_to_slot(primary_slot_id, "⚠️ Ollama selection failed, using fallback replacement")
+                                    self._log_to_slot(primary_slot_id, "❌ Ollama selection failed; rejecting this candidate without fallback substitution")
                                     # Fallback to old method
                                     if has_operator_placeholders:
-                                        template = self.workflow.generator.template_generator._replace_operator_placeholders(
-                                            template, available_operators
-                                        )
+                                        pass  # Strict mode: never substitute an independent random operator/field list
                                     if has_field_placeholders:
-                                        template = self.workflow.generator.template_generator._replace_field_placeholders(
-                                            template, available_fields, template_region
-                                        )
+                                        pass  # Strict mode: never substitute an independent random operator/field list
                                     # Verify fallback worked
                                     import re
                                     remaining_ops = re.findall(r'\b(OPERATOR\d+|operator\d+|Operator\d+)\b', template, re.IGNORECASE)
@@ -500,13 +496,9 @@ class Step5Simulation:
                             else:
                                 # Fallback to old method
                                 if has_operator_placeholders and available_operators:
-                                    template = self.workflow.generator.template_generator._replace_operator_placeholders(
-                                        template, available_operators
-                                    )
+                                    pass  # Strict mode: never substitute an independent random operator/field list
                                 if has_field_placeholders and available_fields:
-                                    template = self.workflow.generator.template_generator._replace_field_placeholders(
-                                        template, available_fields, template_region
-                                    )
+                                    pass  # Strict mode: never substitute an independent random operator/field list
                     
                     # Final check: Ensure NO placeholders remain before submission
                     import re
@@ -629,26 +621,18 @@ class Step5Simulation:
                                         template = replaced
                                         self._log_to_slot(primary_slot_id, "✅ Placeholders replaced before refeed")
                                     else:
-                                        self._log_to_slot(primary_slot_id, "⚠️ Placeholder replacement failed, using fallback")
+                                        self._log_to_slot(primary_slot_id, "❌ Placeholder replacement failed; no fallback substitution will be attempted")
                                         # Fallback to old method
                                         if has_operator_placeholders:
-                                            template = self.workflow.generator.template_generator._replace_operator_placeholders(
-                                                template, available_operators
-                                            )
+                                            pass  # Strict mode: never substitute an independent random operator/field list
                                         if has_field_placeholders:
-                                            template = self.workflow.generator.template_generator._replace_field_placeholders(
-                                                template, available_fields, template_region
-                                            )
+                                            pass  # Strict mode: never substitute an independent random operator/field list
                                 else:
                                     # Fallback to old method
                                     if has_operator_placeholders and available_operators:
-                                        template = self.workflow.generator.template_generator._replace_operator_placeholders(
-                                            template, available_operators
-                                        )
+                                        pass  # Strict mode: never substitute an independent random operator/field list
                                     if has_field_placeholders and available_fields:
-                                        template = self.workflow.generator.template_generator._replace_field_placeholders(
-                                            template, available_fields, template_region
-                                        )
+                                        pass  # Strict mode: never substitute an independent random operator/field list
                             
                             self._log_to_slot(primary_slot_id, "🔄 Attempting refeed correction...")
                             self._update_slot_progress(primary_slot_id, 50.0, "Fixing template...", "")
@@ -708,23 +692,15 @@ class Step5Simulation:
                                                 else:
                                                     # Fallback
                                                     if has_op_placeholders:
-                                                        current_template_for_retry = self.workflow.generator.template_generator._replace_operator_placeholders(
-                                                            current_template_for_retry, available_operators
-                                                        )
+                                                        pass  # Strict mode: never substitute an independent random operator/field list
                                                     if has_field_placeholders:
-                                                        current_template_for_retry = self.workflow.generator.template_generator._replace_field_placeholders(
-                                                            current_template_for_retry, available_fields, template_region
-                                                        )
+                                                        pass  # Strict mode: never substitute an independent random operator/field list
                                             else:
                                                 # Fallback
                                                 if has_op_placeholders and available_operators:
-                                                    current_template_for_retry = self.workflow.generator.template_generator._replace_operator_placeholders(
-                                                        current_template_for_retry, available_operators
-                                                    )
+                                                    pass  # Strict mode: never substitute an independent random operator/field list
                                                 if has_field_placeholders and available_fields:
-                                                    current_template_for_retry = self.workflow.generator.template_generator._replace_field_placeholders(
-                                                        current_template_for_retry, available_fields, template_region
-                                                    )
+                                                    pass  # Strict mode: never substitute an independent random operator/field list
                                         
                                         self._log_to_slot(primary_slot_id, f"✅ Fixed with {len(fixes)} corrections (refeed attempt {refeed_attempt})")
                                         self._log_to_slot(primary_slot_id, f"Retrying with fixed template...")
@@ -821,13 +797,9 @@ class Step5Simulation:
                                                             else:
                                                                 # Fallback
                                                                 if has_op_ph and available_operators:
-                                                                    fixed_template_again = self.workflow.generator.template_generator._replace_operator_placeholders(
-                                                                        fixed_template_again, available_operators
-                                                                    )
+                                                                    pass  # Strict mode: never substitute an independent random operator/field list
                                                                 if has_field_ph and available_fields:
-                                                                    fixed_template_again = self.workflow.generator.template_generator._replace_field_placeholders(
-                                                                        fixed_template_again, available_fields, template_region
-                                                                    )
+                                                                    pass  # Strict mode: never substitute an independent random operator/field list
                                                         
                                                         current_template_for_retry = fixed_template_again
                                                         current_error_msg = retry_error_msg
