@@ -1014,7 +1014,7 @@ Example: If the prompt lists OPERATOR1, OPERATOR2, OPERATOR3, your JSON must inc
                     logger.warning("Ollama could not resolve all expression placeholders")
                     return None
 
-                if re.search(r'\\b(?:OPERATOR|DATA_FIELD)\\d+\\b', resolved_expression, re.IGNORECASE):
+                if re.search(r'\b(?:OPERATOR|DATA_FIELD)\d+\b', resolved_expression, re.IGNORECASE):
                     logger.warning("Unresolved placeholders remain; rejecting generated expression")
                     return None
 
