@@ -191,7 +191,7 @@ class TemplateGenerator:
                 db_path=self.db_path,
                 use_ast=True  # Require AST parsing before a template can be accepted
             )
-            logger.info("✅ Template validator initialized (AST disabled, using prompt engineering and database knowledge)")
+            logger.info("✅ Template validator initialized with strict FASTEXPR AST validation")
                 
         except Exception as e:
             logger.warning(f"Could not setup data fetchers: {e}")
