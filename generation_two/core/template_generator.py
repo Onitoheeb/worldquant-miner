@@ -14,7 +14,7 @@ from ..ollama import OllamaManager, RegionThemeManager
 from ..ollama.duplicate_detector import DuplicateDetector
 from ..data_fetcher import OperatorFetcher, DataFieldFetcher, SmartSearchEngine
 from .template_validator import TemplateValidator
-from ..evolution.research_memory import ResearchMemory
+from ..research_memory import ResearchMemory
 
 logger = logging.getLogger(__name__)
 
