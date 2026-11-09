@@ -1107,62 +1107,18 @@ FIXED EXPRESSION:"""
             return set()
     
     def _aggressive_event_input_fix(self, template: str, error_message: str, region: str = None) -> str:
-        """Aggressively fix event input errors by replacing ALL incompatible operators (including arithmetic operators in expressions)"""
-        import re
-        
-        fixed_template = template
-        
-        # Replace ALL instances of incompatible operators with ts_* versions
-        # First pass: Replace function calls (operator(...))
-        function_replacements = [
-            (r'\badd\s*\(', 'ts_add('),
-            (r'\bsubtract\s*\(', 'ts_subtract('),
-            (r'\bmultiply\s*\(', 'ts_multiply('),
-            (r'\bdivide\s*\(', 'ts_divide('),
-            (r'\bpower\s*\(', 'ts_power('),
-            (r'\bsigned_power\s*\(', 'ts_signed_power('),
-            (r'\babs\s*\(', 'ts_abs('),
-            (r'\blog\s*\(', 'ts_log('),
-            (r'\bsqrt\s*\(', 'ts_sqrt('),
-            (r'\bmin\s*\(', 'ts_min('),
-            (r'\bmax\s*\(', 'ts_max('),
-            (r'\brank\s*\(', 'ts_rank('),
-            (r'\bdelta\s*\(', 'ts_delta('),
-            (r'\bcorrelation\s*\(', 'ts_correlation('),
-            (r'\breverse\s*\(', 'ts_reverse('),
-        ]
-        
-        # Apply function call replacements (multiple passes for nested cases)
-        for _ in range(5):
-            for pattern, replacement in function_replacements:
-                if re.search(pattern, fixed_template, re.IGNORECASE):
-                    fixed_template = re.sub(pattern, replacement, fixed_template, flags=re.IGNORECASE)
-        
-        # Second pass: Replace arithmetic operators in expressions (field1 + field2 -> ts_add(field1, field2))
-        # Only replace if both sides are field identifiers (not already in function calls)
-        # Pattern: field_id + field_id (but not inside function calls)
-        arithmetic_replacements = [
-            # Match: field_id + field_id (but be careful with parentheses)
-            (r'([a-z][a-z0-9_]{10,})\s*\+\s*([a-z][a-z0-9_]{10,})', r'ts_add(\1, \2)'),
-            (r'([a-z][a-z0-9_]{10,})\s*-\s*([a-z][a-z0-9_]{10,})', r'ts_subtract(\1, \2)'),
-            (r'([a-z][a-z0-9_]{10,})\s*\*\s*([a-z][a-z0-9_]{10,})', r'ts_multiply(\1, \2)'),
-            (r'([a-z][a-z0-9_]{10,})\s*/\s*([a-z][a-z0-9_]{10,})', r'ts_divide(\1, \2)'),
-        ]
-        
-        # Apply arithmetic replacements (multiple passes for nested expressions)
-        for _ in range(3):
-            for pattern, replacement in arithmetic_replacements:
-                if re.search(pattern, fixed_template, re.IGNORECASE):
-                    fixed_template = re.sub(pattern, replacement, fixed_template, flags=re.IGNORECASE)
-        
-        # Also handle standalone arithmetic operators (not in function calls)
-        # Replace: field1 + field2 (when not already in a function)
-        # This is tricky, so we'll do a simpler approach: replace all +, -, *, / between identifiers
-        # But we need to be careful not to break function calls
-        
-        logger.info(f"🔧 Aggressive fix applied: {template[:50]}... -> {fixed_template[:50]}...")
-        return fixed_template
-    
+        """Do not guess event-input replacements without verified BRAIN evidence.
+
+        The former regex-based rewrite changed arithmetic and function names
+        based only on a ts_* naming convention. That is not proof that the
+        replacement accepts event inputs or preserves expression semantics.
+        """
+        logger.warning(
+            "Skipping aggressive event-input rewrite: no verified replacement "
+            "catalogue is available for this expression"
+        )
+        return template
+
     def _fix_event_input_error(self, template: str, error_message: str, region: str = None) -> Tuple[str, List[str]]:
         """
         Fix event input errors by replacing incompatible operators
