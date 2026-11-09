@@ -912,8 +912,28 @@ FIXED EXPRESSION:"""
                     current_template = fixed_template
                     logger.info(f"🔧 Also applied targeted fix: {operator_fixes}")
                 
-                # Learn this pattern
-                self._learn_event_input_compatibility(current_template, error_message)
+                # _fix_with_database_knowledge already records this incompatibility.
+                # Do not repeat the same database write or continue with an operator
+                # BRAIN has explicitly rejected.
+                operator_match = re.search(
+                    r'Operator\\s+(\\w+)\\s+(?:does not support|expects only)\\s+event inputs',
+                    error_message,
+                    re.IGNORECASE,
+                )
+                if operator_match:
+                    rejected_operator = operator_match.group(1)
+                    still_present = re.search(
+                        r'\\b' + re.escape(rejected_operator) + r'\\s*\\(',
+                        current_template,
+                        re.IGNORECASE,
+                    )
+                    if still_present:
+                        logger.error(
+                            "Rejecting remote-invalid expression: no verified event-input-compatible "
+                            "replacement exists for operator %s. Skipping AI repair.",
+                            rejected_operator,
+                        )
+                        return None, all_fixes
             
             # Step 2: AST-based correction (only if AST is enabled)
             if self.use_ast and self.validator:
@@ -941,9 +961,22 @@ FIXED EXPRESSION:"""
             # Step 4: Compiler validation (compiler working principle as code)
             compile_result = self.compile_template(current_template, optimize=False)
             if compile_result.success:
-                logger.info(f"✅ Refeed successful after {attempt} attempt(s) - template compiled")
-                # Learn from successful fix
-                self.learn_from_simulation_error(template, error_message, current_template)
+                # A remote BRAIN error cannot be considered repaired merely because
+                # the local parser accepts the same expression. Require an actual
+                # expression change before returning a retry candidate.
+                if current_template.strip() == template.strip():
+                    logger.error(
+                        "Rejecting unchanged expression: local compilation passed, "
+                        "but the original expression still has the remote BRAIN error: %s",
+                        error_message[:160],
+                    )
+                    return None, all_fixes
+
+                logger.info(
+                    "Local compilation passed after %s attempt(s); candidate must be "
+                    "re-simulated by BRAIN before it is considered valid",
+                    attempt,
+                )
                 return current_template, all_fixes
             else:
                 # Compiler found errors, try again with new error info
