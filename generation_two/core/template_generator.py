@@ -776,12 +776,17 @@ Generate a valid FASTEXPR expression that uses operator(data_field, parameters) 
                             use_placeholder_fields=True  # Enable V2 placeholder approach
                         )
                     
-                    # Step 4: Replace placeholders with actual operator names and field IDs
-                    if template and selected_operators:
-                        template = self._replace_operator_placeholders(template, selected_operators)
-                    if template and selected_fields:
-                        template = self._replace_field_placeholders(template, selected_fields, region)
-                    
+                    # Never resolve unresolved placeholders with a separate random list.
+                    # The selection used to create the expression must be the selection
+                    # used to resolve it; otherwise the expression's construction is invalid.
+                    if template and re.search(r'\\b(?:OPERATOR|DATA_FIELD)\\d+\\b', template, re.IGNORECASE):
+                        logger.warning(
+                            "Generated template still contains unresolved placeholders; "
+                            "rejecting it instead of substituting independently selected operators/fields: %s",
+                            template[:120]
+                        )
+                        template = None
+
                     if not template:
                         logger.warning(f"Failed to generate template {i+1}, attempt {retry_count + 1}")
                         retry_count += 1
