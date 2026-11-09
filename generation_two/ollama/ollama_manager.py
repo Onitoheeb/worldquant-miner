@@ -1230,29 +1230,20 @@ CRITICAL FASTEXPR SYNTAX RULES:
             user_prompt += "\nGenerate a NEW and DIFFERENT expression, not similar to the ones above."
         
         user_prompt += "\n\nDIVERSITY REQUIREMENTS:"
-        user_prompt += "\n- Use DIFFERENT operators each time (avoid repeating OPERATOR1, OPERATOR1, OPERATOR1...)"
-        user_prompt += "\n- Mix different operator types from the AVAILABLE OPERATORS list"
-        user_prompt += "\n- Combine operators creatively: e.g., OPERATOR1(DATA_FIELD1 + DATA_FIELD2, 4) or OPERATOR1(OPERATOR2(DATA_FIELD1), 0.5)"
-        user_prompt += "\n- Use arithmetic operators when appropriate: +, -, *, /"
-        user_prompt += "\n- Use logical operators when appropriate: >, <, >=, <=, ==, !=, &&, ||"
-        user_prompt += "\n- CRITICAL: Use COMMAS for operator parameters: OPERATOR1(DATA_FIELD1, 20) NOT OPERATOR1(DATA_FIELD1 20)"
-        
-        user_prompt += "\n\n🚨 CRITICAL: MAXIMUM 5 OPERATORS - NO EXCEPTIONS!"
-        user_prompt += "\n- Count operators carefully: each OPERATOR1, OPERATOR2, etc. counts as 1 operator"
-        user_prompt += "\n- Arithmetic operators (+, -, *, /) also count as operators"
-        user_prompt += "\n- Example with 3 operators: OPERATOR1(OPERATOR2(OPERATOR3(DATA_FIELD1))) = 3 operators"
-        user_prompt += "\n- Example with 5 operators: OPERATOR1(OPERATOR2(OPERATOR3(OPERATOR4(OPERATOR5(DATA_FIELD1)))), 4) = exactly 5 operators"
-        user_prompt += "\n- DO NOT exceed 5 operators - if you need more, simplify the expression!"
-        user_prompt += "\n\n🚨 CRITICAL: NO CONSECUTIVE DUPLICATE OPERATORS!"
-        user_prompt += "\n- DO NOT nest the same operator placeholder multiple times: OPERATOR1(OPERATOR1(OPERATOR1(...))) is FORBIDDEN"
-        user_prompt += "\n- Each operator placeholder should appear only ONCE in the expression, or at most in different contexts (not nested)"
-        user_prompt += "\n- Example of FORBIDDEN: OPERATOR1(OPERATOR1(OPERATOR1(DATA_FIELD1))) - REJECTED"
-        user_prompt += "\n- Example of ALLOWED: OPERATOR1(DATA_FIELD1, 20) + OPERATOR1(DATA_FIELD2, 10) - different contexts, OK"
-        user_prompt += "\n\nGenerate a SIMPLE, valid FASTEXPR expression using MAXIMUM 5 operators total. Keep it simple - avoid deep nesting."
-        user_prompt += "\nUse COMMAS for parameters: OPERATOR1(DATA_FIELD1, param). Return ONLY the expression:"
-        user_prompt += "\n\n🚨 CRITICAL: Return ONLY the FASTEXPR expression with placeholders. NO natural language, NO explanations, NO 'Let's generate...', NO 'We'll focus...'."
-        user_prompt += "\nJust return the pure expression with placeholders like: OPERATOR1(OPERATOR2(DATA_FIELD1), 5)"
-        
+        user_prompt += "\n- Explore a genuinely different financial relationship, not only a cosmetic parameter change."
+        user_prompt += "\n- Prefer operators whose definitions, scopes, and input counts match the selected fields."
+        user_prompt += "\n- Use arithmetic or logical operators only when they make economic sense."
+        user_prompt += "\n- Keep the expression simple and use no more than 5 function operators."
+        if use_placeholder_operators or use_placeholder_fields:
+            user_prompt += "\n- Respect the placeholder instructions above exactly."
+            user_prompt += "\n- Use commas for operator parameters."
+            user_prompt += "\nReturn ONLY the FASTEXPR expression, with placeholders only where requested."
+        else:
+            user_prompt += "\n- Use exact operator names and exact field IDs from the catalogues above."
+            user_prompt += "\n- Do not output OPERATORn or DATA_FIELDn placeholders."
+            user_prompt += "\n- Do not invent operators, fields, or unsupported arguments."
+            user_prompt += "\nReturn ONLY the complete FASTEXPR expression, without explanations or markdown."
+
         # Debug: Log that we're about to call generate
         logger.debug(f"Calling Ollama generate() with prompt length: {len(user_prompt)}")
         result = self.generate(user_prompt, system_prompt, temperature=0.7, max_tokens=300, progress_callback=progress_callback)
