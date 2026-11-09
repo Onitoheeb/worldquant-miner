@@ -670,165 +670,85 @@ class OllamaManager:
         available_fields: List[Dict],
         progress_callback: Optional[Callable[[str], None]] = None,
         generator: Optional[Any] = None,
-        region: str = None,  # New: for querying recently used fields
-        backtest_storage: Optional[Any] = None  # New: for querying database
+        region: str = None,
+        backtest_storage: Optional[Any] = None
     ) -> Optional[Dict]:
         """
-        Ask Ollama to select operators and fields by index to replace placeholders
-        
-        Args:
-            placeholder_expression: Expression with placeholders like "OPERATOR1(OPERATOR2(DATA_FIELD1), 5)"
-            available_operators: List of available operators
-            available_fields: List of available data fields
-            progress_callback: Optional progress callback
-            generator: Optional generator instance (to reuse mappings)
-        
-        Returns:
-            Dict with "operators" and "fields" mappings, or None if failed
+        Select valid operator/field indices locally.
+
+        This is a constrained list-selection task, not an LLM reasoning task.
+        Keeping it deterministic in structure (with randomized diverse choices)
+        avoids slow, malformed model responses and preserves strict validation.
         """
         from generation_two.core.algorithmic_template_generator import AlgorithmicTemplateGenerator
-        
+
         if generator is None:
             generator = AlgorithmicTemplateGenerator(available_operators, available_fields)
 
-        # Get recently used fields to avoid repetition
         recently_used_fields = []
         if region and backtest_storage and hasattr(backtest_storage, 'get_recently_used_fields'):
             try:
-                recently_used_fields = backtest_storage.get_recently_used_fields(region, limit=50, lookback_hours=24)
-                if recently_used_fields:
-                    logger.debug(f"Excluding {len(recently_used_fields)} recently used fields for {region}")
+                recently_used_fields = backtest_storage.get_recently_used_fields(
+                    region, limit=50, lookback_hours=24
+                ) or []
             except Exception as e:
-                logger.debug(f"Could not get recently used fields: {e}")
+                logger.debug("Could not retrieve recently used fields: %s", e)
 
-        prompt = generator.get_operator_selection_prompt(
+        # Build the same display-index mappings used by the replacement method.
+        # This also excludes recently used fields and keeps selection compatible
+        # with the existing field/operator catalogue.
+        generator.get_operator_selection_prompt(
             placeholder_expression,
             available_operators,
             available_fields,
             recently_used_fields=recently_used_fields
         )
-        
-        # Store generator for later use in replacement
         self._last_generator = generator
-        
-        system_prompt = """You are a selection assistant. Your ONLY task is to select INDEX NUMBERS from provided lists.
 
-CRITICAL RULES:
-1. DO NOT generate or write any operator names or field names. ONLY return index numbers in JSON format.
-2. You MUST select indices for EVERY placeholder mentioned in the prompt - missing any placeholder is an error.
-3. Count the placeholders in the expression carefully - if you see OPERATOR1, OPERATOR2, OPERATOR3, OPERATOR4, you must select indices for ALL FOUR.
-4. Return ONLY a valid JSON object with index numbers. No explanations, no markdown, no operator names, no field names - just JSON with numbers.
+        required_operators = sorted(
+            {f"OPERATOR{n}" for n in re.findall(r"OPERATOR(\\d+)", placeholder_expression, re.IGNORECASE)},
+            key=lambda value: int(re.search(r"\\d+", value).group())
+        )
+        required_fields = sorted(
+            {f"DATA_FIELD{n}" for n in re.findall(r"DATA_FIELD(\\d+)", placeholder_expression, re.IGNORECASE)},
+            key=lambda value: int(re.search(r"\\d+", value).group())
+        )
 
-Example: If you see operator at [5], return 5 (not the operator name).
-Example: If you see field at [12], return 12 (not the field name).
-Example: If the prompt lists OPERATOR1, OPERATOR2, OPERATOR3, your JSON must include all three: {"operators": {"OPERATOR1": 5, "OPERATOR2": 12, "OPERATOR3": 23}}"""
-        
+        operator_mapping = getattr(generator, "_last_operator_mapping", {})
+        field_mapping = getattr(generator, "_last_field_mapping", {})
+        if len(operator_mapping) < len(required_operators):
+            logger.warning(
+                "Not enough eligible operators: need %d, have %d",
+                len(required_operators), len(operator_mapping)
+            )
+            return None
+        if len(field_mapping) < len(required_fields):
+            logger.warning(
+                "Not enough eligible fields after diversity filtering: need %d, have %d",
+                len(required_fields), len(field_mapping)
+            )
+            return None
+
+        # Sample display indices, not catalogue indices: replacement translates
+        # these through the generator's saved mappings.
+        operator_indices = random.sample(list(operator_mapping.keys()), len(required_operators))
+        field_indices = random.sample(list(field_mapping.keys()), len(required_fields))
+        selection = {
+            "operators": dict(zip(required_operators, operator_indices)),
+            "fields": dict(zip(required_fields, field_indices))
+        }
+
+        logger.info(
+            "Selected placeholders locally (no Ollama call): %d operators, %d fields",
+            len(required_operators), len(required_fields)
+        )
         if progress_callback:
-            progress_callback("Asking Ollama to select operators and fields...")
-        
-        result = self.generate(prompt, system_prompt, temperature=0.1, max_tokens=180, progress_callback=progress_callback)
-        
-        if not result:
-            return None
-        
-        # Parse JSON response
-        try:
-            # Clean up result (remove markdown code blocks if present)
-            result = result.strip()
-            if '```' in result:
-                # Extract JSON from code block
-                lines = result.split('\n')
-                json_lines = []
-                in_json = False
-                for line in lines:
-                    if '```json' in line.lower() or '```' in line:
-                        in_json = not in_json
-                        continue
-                    if in_json or (line.strip().startswith('{') and line.strip().endswith('}')):
-                        json_lines.append(line)
-                if json_lines:
-                    result = '\n'.join(json_lines)
-            
-            # Try to find JSON object
-            json_match = re.search(r'\{[^{}]*"operators"[^{}]*\{[^{}]*\}[^{}]*"fields"[^{}]*\{[^{}]*\}[^{}]*\}', result, re.DOTALL)
-            if json_match:
-                result = json_match.group(0)
-            
-            selection = json.loads(result)
-            
-            # Normalize placeholder keys to uppercase (handle both OPERATOR1 and operator1)
-            if 'operators' in selection:
-                normalized_operators = {}
-                for key, value in selection['operators'].items():
-                    # Convert to uppercase
-                    normalized_key = key.upper()
-                    normalized_operators[normalized_key] = value
-                selection['operators'] = normalized_operators
-            
-            if 'fields' in selection:
-                normalized_fields = {}
-                for key, value in selection['fields'].items():
-                    # Convert to uppercase
-                    normalized_key = key.upper()
-                    normalized_fields[normalized_key] = value
-                selection['fields'] = normalized_fields
-            
-            # Validate that ALL required placeholders are present
-            required_ops = getattr(generator, '_required_operator_placeholders', [])
-            required_fields = getattr(generator, '_required_field_placeholders', [])
-            
-            # Filter out any selections for placeholders that don't exist in the template
-            if 'operators' in selection:
-                valid_operators = {}
-                for key, value in selection['operators'].items():
-                    if key.upper() in required_ops:
-                        valid_operators[key.upper()] = value
-                    else:
-                        logger.warning(f"⚠️ Ollama selected placeholder '{key}' which doesn't exist in template. Ignoring.")
-                selection['operators'] = valid_operators
-            
-            if 'fields' in selection:
-                valid_fields = {}
-                for key, value in selection['fields'].items():
-                    if key.upper() in required_fields:
-                        valid_fields[key.upper()] = value
-                    else:
-                        logger.warning(f"⚠️ Ollama selected placeholder '{key}' which doesn't exist in template. Ignoring.")
-                selection['fields'] = valid_fields
-            
-            missing_operators = [op for op in required_ops if op not in selection.get('operators', {})]
-            missing_fields = [field for field in required_fields if field not in selection.get('fields', {})]
-            
-            if missing_operators or missing_fields:
-                logger.warning("Ollama selection is incomplete; rejecting this candidate instead of substituting unrelated values.")
-                logger.warning(f"   Missing operators: {missing_operators}")
-                logger.warning(f"   Missing fields: {missing_fields}")
-                logger.warning(f"   Required operators: {required_ops}")
-                logger.warning(f"   Required fields: {required_fields}")
-                logger.warning(f"   Received after filtering: {selection}")
-                return None
+            try:
+                progress_callback("Selected valid operator and field candidates locally.")
+            except Exception:
+                pass
+        return selection
 
-            # Reject invalid indices before they can reach replacement logic.
-            for placeholder, index in selection.get('operators', {}).items():
-                if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < len(available_operators):
-                    logger.warning(f"Invalid operator index for {placeholder}: {index!r}")
-                    return None
-            for placeholder, index in selection.get('fields', {}).items():
-                if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < len(available_fields):
-                    logger.warning(f"Invalid data-field index for {placeholder}: {index!r}")
-                    return None
-
-            # Validate structure only after completeness and index checks.
-            if 'operators' in selection and 'fields' in selection:
-                return selection
-            else:
-                logger.warning(f"Invalid selection structure: {selection}")
-                return None
-                
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse JSON selection: {e}, response: {result[:200]}")
-            return None
-    
     def replace_placeholders_with_selection(
         self,
         placeholder_expression: str,
