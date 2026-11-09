@@ -920,9 +920,9 @@ class OllamaManager:
         successful_patterns: List[str] = None,
         progress_callback: Optional[Callable[[str], None]] = None,
         use_placeholder_fields: bool = True,  # V2 approach: use placeholders to avoid misspelling
-        use_placeholder_operators: bool = True,
         forbidden_operators: List[str] = None,  # Operators that are forbidden (already used in batch)
-        use_algorithmic_generation: bool = True  # New: Use algorithmic generation + Ollama selection
+        use_algorithmic_generation: bool = True,  # New: Use algorithmic generation + Ollama selection
+        use_placeholder_operators: bool = True
     ) -> Optional[str]:
         """
         Generate alpha template from hypothesis with enhanced prompt engineering and AST guidance
