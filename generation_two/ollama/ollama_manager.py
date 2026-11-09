@@ -1074,6 +1074,9 @@ CRITICAL FASTEXPR SYNTAX RULES:
                         op_info += f" [Takes {input_count} input{'s' if input_count > 1 else ''}]"
                     if category:
                         op_info += f" (Category: {category})"
+                    scope = op.get('scope', [])
+                    if scope:
+                        op_info += f" [Scope: {scope}]"
                     operator_list.append(op_info)
             
             if operator_list:
@@ -1146,8 +1149,22 @@ CRITICAL FASTEXPR SYNTAX RULES:
             for field in available_fields:
                 field_id = field.get('id', '')
                 if field_id:
-                    field_examples.append(f"  - {field_id}")
-                    if len(field_examples) >= 15:
+                    metadata_parts = []
+                    field_type = field.get('type') or field.get('field_type')
+                    dataset = field.get('dataset') or field.get('dataset_id')
+                    description = field.get('description')
+                    coverage = field.get('coverage')
+                    if field_type:
+                        metadata_parts.append(f"type={field_type}")
+                    if dataset:
+                        metadata_parts.append(f"dataset={dataset}")
+                    if coverage is not None:
+                        metadata_parts.append(f"coverage={coverage}")
+                    if description:
+                        metadata_parts.append(f"description={str(description)[:140]}")
+                    metadata_text = " | " + " | ".join(metadata_parts) if metadata_parts else ""
+                    field_examples.append(f"  - {field_id}{metadata_text}")
+                    if len(field_examples) >= 25:
                         break
             
             if field_examples:
