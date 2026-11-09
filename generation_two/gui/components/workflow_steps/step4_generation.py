@@ -526,6 +526,12 @@ Generate a valid FASTEXPR expression that uses operator(data_field, parameters) 
                     selected_operator_indices = []
                     selected_operators_list = available_operators
                     if available_operators:
+                        # Use the same authoritative metadata as the AST generator to
+                        # enforce REGULAR scope before an operator enters a candidate.
+                        from generation_two.core.algorithmic_template_generator import AlgorithmicTemplateGenerator
+                        catalogue_metadata = AlgorithmicTemplateGenerator(
+                            available_operators, data_fields, alpha_type="REGULAR"
+                        ).operator_metadata
                         # V2 approach: Select 2-4 operators (not more) to keep expressions simple
                         # Use exclusive selection with usage-based diversity
                         with operator_pool_lock:
@@ -533,11 +539,21 @@ Generate a valid FASTEXPR expression that uses operator(data_field, parameters) 
                             # vec_* operators require VECTOR-typed inputs. This
                             # placeholder generator does not build type-directed AST
                             # leaves, so never offer vector operators for arbitrary fields.
-                            eligible_operator_indices = [
-                                i for i, operator in enumerate(available_operators)
-                                if operator.get("name")
-                                and not str(operator.get("name", "")).lower().startswith("vec_")
-                            ]
+                            eligible_operator_indices = []
+                            for i, operator in enumerate(available_operators):
+                                name = str(operator.get("name", "")).strip()
+                                metadata = catalogue_metadata.get(name)
+                                if not name or not metadata:
+                                    continue
+                                if name.lower().startswith("vec_"):
+                                    continue
+                                scopes = {
+                                    str(scope).upper()
+                                    for scope in (getattr(metadata, "scope", None) or [])
+                                }
+                                if scopes and "REGULAR" not in scopes:
+                                    continue
+                                eligible_operator_indices.append(i)
                             available_indices = [
                                 i for i in eligible_operator_indices
                                 if i not in used_operator_indices
