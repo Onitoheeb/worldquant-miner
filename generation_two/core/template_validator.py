@@ -961,6 +961,29 @@ FIXED EXPRESSION:"""
             # Step 4: Compiler validation (compiler working principle as code)
             compile_result = self.compile_template(current_template, optimize=False)
             if compile_result.success:
+                # A locally valid expression is still invalid if it retains the
+                # exact operator that BRAIN rejected as inaccessible/unknown.
+                if ("unknown operator" in error_message.lower() or
+                        ("inaccessible" in error_message.lower() and "operator" in error_message.lower())):
+                    rejected_match = re.search(
+                        r'(?:unknown|inaccessible).*?operator\\s+["\\']?(\\w+)',
+                        error_message,
+                        re.IGNORECASE,
+                    )
+                    if rejected_match:
+                        rejected_operator = rejected_match.group(1)
+                        if re.search(
+                            r'\\b' + re.escape(rejected_operator) + r'\\s*\\(',
+                            current_template,
+                            re.IGNORECASE,
+                        ):
+                            logger.error(
+                                "Rejecting candidate: BRAIN reported operator %s as unknown/inaccessible, "
+                                "but the operator remains in the expression",
+                                rejected_operator,
+                            )
+                            return None, all_fixes
+
                 # A remote BRAIN error cannot be considered repaired merely because
                 # the local parser accepts the same expression. Require an actual
                 # expression change before returning a retry candidate.
