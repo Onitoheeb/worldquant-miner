@@ -1427,13 +1427,13 @@ FIXED EXPRESSION:"""
             logger.info(f"📚 Detected event input error - calling _learn_event_input_compatibility")
             self._learn_event_input_compatibility(template, error_message)
         
-        # Try to generate a fix if not provided
+        # Learning from a remote BRAIN rejection must be observation-only.
+        # Repair is handled by refeed_with_correction(), which has the context
+        # needed to verify deterministic replacements. Calling fix_template()
+        # here could launch a second Ollama repair for the same rejected alpha,
+        # create duplicate learning records, and bypass the early-stop guard.
         if not fixed_template:
-            try:
-                fixed_template, _ = self.fix_template(template, error_message)
-            except Exception as e:
-                logger.debug(f"Error generating fix in learn_from_simulation_error: {e}")
-                fixed_template = template  # Use original template if fix generation fails
+            fixed_template = template
         
         # Learn from the error (stores to JSON file) - only if AST is enabled
         if self.use_ast and self.corrector:
