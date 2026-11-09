@@ -396,6 +396,20 @@ class FASTEXPRParser:
                     operator_name=operator_name
                 ))
             else:
+                # The current BRAIN Operators reference specifies kth_element(x, d, k).
+                # Reject calls missing either required lookback or k rather than
+                # allowing BRAIN to reject them later. The parser currently supports
+                # positional arguments here; named string arguments are not rewritten.
+                if operator_name == "kth_element" and len(ast.children) < 3:
+                    errors.append(SyntaxError(
+                        'invalid_operator_arguments',
+                        'kth_element requires x, d, and k (see Brain Operators reference)',
+                        ast.position,
+                        template,
+                        operator_name=operator_name
+                    ))
+                    return errors
+
                 # Operator scope identifies the BRAIN alpha type in which this
                 # operator is available; it is not a field type.
                 operator_scope = self.operator_scopes.get(operator_name, set())
