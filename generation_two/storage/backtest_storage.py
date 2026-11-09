@@ -963,17 +963,30 @@ class BacktestStorage:
             if existing:
                 # Update existing pattern
                 pattern_id, success_count, failure_count = existing
-                if success:
-                    success_count += 1
-                else:
-                    failure_count += 1
-                
+                # A validator can encounter the same BRAIN error through several
+                # retry/callback paths. Count an example only once so repeated
+                # logging does not inflate failure evidence.
+                cursor.execute(
+                    "SELECT example_template FROM ast_patterns WHERE id = ?",
+                    (pattern_id,)
+                )
+                previous_example = cursor.fetchone()
+                same_example = bool(
+                    example_template and previous_example and
+                    previous_example[0] == example_template
+                )
+                if not same_example:
+                    if success:
+                        success_count += 1
+                    else:
+                        failure_count += 1
+
                 cursor.execute('''
                     UPDATE ast_patterns SET
                         success_count = ?,
                         failure_count = ?,
-                        example_template = ?,
-                        metadata = ?,
+                        example_template = COALESCE(?, example_template),
+                        metadata = COALESCE(?, metadata),
                         last_used_at = CURRENT_TIMESTAMP
                     WHERE id = ?
                 ''', (success_count, failure_count, example_template, metadata_json, pattern_id))
