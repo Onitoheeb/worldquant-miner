@@ -70,7 +70,8 @@ class OllamaManager:
         model: str = "qwen2.5-coder:32b",
         timeout: int = 120,
         max_retries: int = 3,
-        rate_limit: float = 2.0  # seconds between requests
+        rate_limit: float = 2.0,  # seconds between requests
+        max_concurrent_generations: int = 1
     ):
         """
         Initialize Ollama manager
@@ -87,6 +88,10 @@ class OllamaManager:
         self.timeout = timeout
         self.max_retries = max_retries
         self.rate_limit = rate_limit
+        # Serialize local-model inference by default. Simulation slots may remain
+        # concurrent, but Ollama generation must not overload a single local model.
+        self.max_concurrent_generations = max(1, int(max_concurrent_generations))
+        self.generation_semaphore = threading.BoundedSemaphore(self.max_concurrent_generations)
         
         # Connection state
         self.is_available = False
@@ -322,11 +327,33 @@ class OllamaManager:
         self.last_request_time = time.time()
     
     def generate(
-        self, 
-        prompt: str, 
+        self,
+        prompt: str,
         system_prompt: str = None,
         temperature: float = 0.7,
-        max_tokens: int = 1000,  # Increased for better context handling
+        max_tokens: int = 1000,
+        progress_callback: Optional[callable] = None
+    ) -> Optional[str]:
+        """Run one local-model generation at a time by default."""
+        queued_at = time.time()
+        logger.info(
+            "Waiting for Ollama generation permit (limit=%s)",
+            self.max_concurrent_generations
+        )
+        with self.generation_semaphore:
+            waited = time.time() - queued_at
+            if waited >= 1:
+                logger.info("Ollama generation permit acquired after %.1fs", waited)
+            return self._generate_impl(
+                prompt, system_prompt, temperature, max_tokens, progress_callback
+            )
+
+    def _generate_impl(
+        self,
+        prompt: str,
+        system_prompt: str = None,
+        temperature: float = 0.7,
+        max_tokens: int = 1000,
         progress_callback: Optional[callable] = None
     ) -> Optional[str]:
         """
