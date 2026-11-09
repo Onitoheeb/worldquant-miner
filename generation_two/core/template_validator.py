@@ -846,29 +846,27 @@ FIXED EXPRESSION:"""
         current_template = template
         all_fixes = []
         
-        # Check if this is an event input error - retry indefinitely
+        # Repair must always be bounded. Previously selected error classes could
+        # override the caller's limit with 999 and trap the generator in Ollama loops.
+        requested_attempts = max(1, int(max_attempts or 1))
+        max_attempts = min(requested_attempts, 5)
+        if requested_attempts > max_attempts:
+            logger.warning(
+                "Capping refeed attempts from %s to %s to prevent unbounded repair loops",
+                requested_attempts, max_attempts
+            )
+
         is_event_input_error = 'does not support event inputs' in error_message.lower() or 'expects only event inputs' in error_message.lower()
-        if is_event_input_error:
-            max_attempts = 999  # Effectively unlimited retries
-            logger.info("🔄 Event input error detected - will retry until successful")
-        
-        # Check if this is an "Invalid number of inputs" error - also retry indefinitely
-        is_input_count_error = ('invalid number of inputs' in error_message.lower() or 
-                               'should be exactly' in error_message.lower() or 
-                               'should be at least' in error_message.lower())
-        if is_input_count_error:
-            max_attempts = 999  # Effectively unlimited retries
-            logger.info("🔄 Invalid number of inputs error detected - will retry until successful")
-        
-        # Check if this is an "Unexpected character" error (missing comma) - also retry indefinitely
+        is_input_count_error = ('invalid number of inputs' in error_message.lower() or
+                                'should be exactly' in error_message.lower() or
+                                'should be at least' in error_message.lower())
         is_unexpected_char_error = 'unexpected character' in error_message.lower()
-        if is_unexpected_char_error:
-            max_attempts = 999  # Effectively unlimited retries
-            logger.info("🔄 Unexpected character error detected (likely missing comma) - will retry until successful")
-        
+
         attempt = 0
         while attempt < max_attempts:
             attempt += 1
+            attempt_template = current_template
+            attempt_error = error_message
             logger.info(f"🔄 Refeed attempt {attempt}/{max_attempts} for error: {error_message[:60]}")
             
             # Step 0: Apply database knowledge fixes FIRST (lookback, missing comma, unknown variable, event inputs, unknown operator)
@@ -971,13 +969,22 @@ FIXED EXPRESSION:"""
                         is_unexpected_char_error = True
                         logger.warning(f"⚠️ Still unexpected character error after fix, retrying with: {error_msg[:50]}")
                     else:
-                        # Different error - use it for next attempt
+                        # Different error - use it for next attempt and refresh error flags.
                         error_message = error_msg
-                        # Update error type flags
                         is_event_input_error = 'does not support event inputs' in error_msg.lower() or 'expects only event inputs' in error_msg.lower()
-                        is_input_count_error = ('invalid number of inputs' in error_msg.lower() or 
-                                               'should be exactly' in error_msg.lower() or 
-                                               'should be at least' in error_msg.lower())
+                        is_input_count_error = ('invalid number of inputs' in error_msg.lower() or
+                                                'should be exactly' in error_msg.lower() or
+                                                'should be at least' in error_msg.lower())
+                        is_unexpected_char_error = 'unexpected character' in error_msg.lower()
+
+                    # Stop immediately when neither the expression nor compiler error
+                    # changed. Repeating the same Ollama prompt cannot make progress.
+                    if current_template.strip() == attempt_template.strip() and error_message.strip().lower() == attempt_error.strip().lower():
+                        logger.error(
+                            "Stopping refeed: attempt %s made no progress (same expression and compiler error: %s)",
+                            attempt, error_message[:120]
+                        )
+                        break
                 else:
                     # Try traditional validation
                     is_valid, error_msg, _ = self.validate_template(current_template, region)
@@ -1760,7 +1767,9 @@ Return ONLY the fixed expression, no explanations:"""
         
         # Extract operator name from error message
         # Pattern: "Attempted to use inaccessible or unknown operator 'X'"
-        op_match = re.search(r"unknown operator ['\"]?(\w+)['\"]?", error_message, re.IGNORECASE)
+        op_match = re.search(r"unknown operator\s*:\s*['\"]?(\w+)['\"]?", error_message, re.IGNORECASE)
+        if not op_match:
+            op_match = re.search(r"unknown operator ['\"]?(\w+)['\"]?", error_message, re.IGNORECASE)
         if not op_match:
             op_match = re.search(r"inaccessible.*operator ['\"]?(\w+)['\"]?", error_message, re.IGNORECASE)
         if not op_match:
@@ -1790,6 +1799,8 @@ Return ONLY the fixed expression, no explanations:"""
                     'max': 'ts_max',
                     'min': 'ts_min',
                     'std': 'ts_std',
+                    # BRAIN exposes power(x, y), not a ts_power time-series variant.
+                    'ts_power': 'power',
                 }
                 
                 replacement = replacements.get(unknown_op.lower())
