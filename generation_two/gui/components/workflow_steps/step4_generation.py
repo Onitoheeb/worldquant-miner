@@ -413,6 +413,13 @@ Generate a valid FASTEXPR expression that uses operator(data_field, parameters) 
                             )
                             if llm_candidate:
                                 llm_candidate = llm_candidate.strip().strip("`").strip()
+                                if research_memory:
+                                    research_memory.record_hypothesis(
+                                        research_prompt,
+                                        region,
+                                        status="candidate_generated",
+                                        supporting_evidence=llm_candidate
+                                    )
                                 validator = getattr(template_generator, "template_validator", None)
                                 compile_result = (
                                     validator.compile_template(llm_candidate, optimize=False)
