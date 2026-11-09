@@ -920,6 +920,7 @@ class OllamaManager:
         successful_patterns: List[str] = None,
         progress_callback: Optional[Callable[[str], None]] = None,
         use_placeholder_fields: bool = True,  # V2 approach: use placeholders to avoid misspelling
+        use_placeholder_operators: bool = True,
         forbidden_operators: List[str] = None,  # Operators that are forbidden (already used in batch)
         use_algorithmic_generation: bool = True  # New: Use algorithmic generation + Ollama selection
     ) -> Optional[str]:
@@ -1076,34 +1077,42 @@ CRITICAL FASTEXPR SYNTAX RULES:
                     operator_list.append(op_info)
             
             if operator_list:
-                user_prompt += "\n\n🚨 CRITICAL: AVAILABLE OPERATORS - USE OPERATOR PLACEHOLDERS (OPERATOR1, OPERATOR2, etc.):"
-                user_prompt += "\n" + "\n".join(operator_list)
-                user_prompt += f"\n\n🚨 OPERATOR PLACEHOLDERS: Use OPERATOR1, OPERATOR2, OPERATOR3, etc. instead of actual operator names!"
-                user_prompt += "\n- OPERATOR1 maps to the first operator in the list above"
-                user_prompt += "\n- OPERATOR2 maps to the second operator in the list above"
-                user_prompt += "\n- OPERATOR3 maps to the third operator in the list above"
-                user_prompt += "\n- And so on..."
-                
-                # Add forbidden operators list if provided
-                if forbidden_operators:
-                    user_prompt += f"\n\n🚫 FORBIDDEN OPERATORS (DO NOT USE THESE - already used in batch): {', '.join(forbidden_operators)}"
-                    user_prompt += "\n⚠️ If you use any of these forbidden operators, your expression will be REJECTED!"
-                    user_prompt += "\n⚠️ Use ONLY operators from the AVAILABLE OPERATORS list above, NOT from the FORBIDDEN list!"
-                
-                user_prompt += "\n\nCRITICAL RULES FOR OPERATOR PLACEHOLDERS:"
-                user_prompt += "\n1. Use OPERATOR1, OPERATOR2, OPERATOR3, etc. as placeholders - DO NOT use actual operator names!"
-                user_prompt += "\n2. Example: OPERATOR1(DATA_FIELD1, 5) NOT ts_rank(DATA_FIELD1, 5)"
-                user_prompt += "\n3. Example: OPERATOR1(OPERATOR2(DATA_FIELD1), 5) for nested operators"
-                user_prompt += "\n4. The placeholders will be automatically replaced with actual operator names from the list above"
-                user_prompt += "\n5. Choose operators from the AVAILABLE OPERATORS list by using their index as OPERATOR1, OPERATOR2, etc."
-                user_prompt += "\n6. IMPORTANT: Check the operator definition to see how many inputs it takes!"
-                user_prompt += "\n   - If operator takes 1 input: OPERATOR1(DATA_FIELD1) or OPERATOR1(DATA_FIELD1, parameter)"
-                user_prompt += "\n   - If operator takes 2 inputs: OPERATOR1(DATA_FIELD1, DATA_FIELD2) or OPERATOR1(DATA_FIELD1, DATA_FIELD2, parameter)"
-                user_prompt += "\n   - If operator takes 3 inputs: OPERATOR1(DATA_FIELD1, DATA_FIELD2, DATA_FIELD3)"
-                user_prompt += "\n   - Look at the [Takes X input(s)] note in the operator list above"
-                if forbidden_operators:
-                    user_prompt += "\n7. DO NOT use operators from the FORBIDDEN list"
-        
+                if use_placeholder_operators:
+                    user_prompt += "\n\n🚨 CRITICAL: AVAILABLE OPERATORS - USE OPERATOR PLACEHOLDERS (OPERATOR1, OPERATOR2, etc.):"
+                    user_prompt += "\n" + "\n".join(operator_list)
+                    user_prompt += f"\n\n🚨 OPERATOR PLACEHOLDERS: Use OPERATOR1, OPERATOR2, OPERATOR3, etc. instead of actual operator names!"
+                    user_prompt += "\n- OPERATOR1 maps to the first operator in the list above"
+                    user_prompt += "\n- OPERATOR2 maps to the second operator in the list above"
+                    user_prompt += "\n- OPERATOR3 maps to the third operator in the list above"
+                    user_prompt += "\n- And so on..."
+                    
+                    # Add forbidden operators list if provided
+                    if forbidden_operators:
+                        user_prompt += f"\n\n🚫 FORBIDDEN OPERATORS (DO NOT USE THESE - already used in batch): {', '.join(forbidden_operators)}"
+                        user_prompt += "\n⚠️ If you use any of these forbidden operators, your expression will be REJECTED!"
+                        user_prompt += "\n⚠️ Use ONLY operators from the AVAILABLE OPERATORS list above, NOT from the FORBIDDEN list!"
+                    
+                    user_prompt += "\n\nCRITICAL RULES FOR OPERATOR PLACEHOLDERS:"
+                    user_prompt += "\n1. Use OPERATOR1, OPERATOR2, OPERATOR3, etc. as placeholders - DO NOT use actual operator names!"
+                    user_prompt += "\n2. Example: OPERATOR1(DATA_FIELD1, 5) NOT ts_rank(DATA_FIELD1, 5)"
+                    user_prompt += "\n3. Example: OPERATOR1(OPERATOR2(DATA_FIELD1), 5) for nested operators"
+                    user_prompt += "\n4. The placeholders will be automatically replaced with actual operator names from the list above"
+                    user_prompt += "\n5. Choose operators from the AVAILABLE OPERATORS list by using their index as OPERATOR1, OPERATOR2, etc."
+                    user_prompt += "\n6. IMPORTANT: Check the operator definition to see how many inputs it takes!"
+                    user_prompt += "\n   - If operator takes 1 input: OPERATOR1(DATA_FIELD1) or OPERATOR1(DATA_FIELD1, parameter)"
+                    user_prompt += "\n   - If operator takes 2 inputs: OPERATOR1(DATA_FIELD1, DATA_FIELD2) or OPERATOR1(DATA_FIELD1, DATA_FIELD2, parameter)"
+                    user_prompt += "\n   - If operator takes 3 inputs: OPERATOR1(DATA_FIELD1, DATA_FIELD2, DATA_FIELD3)"
+                    user_prompt += "\n   - Look at the [Takes X input(s)] note in the operator list above"
+                    if forbidden_operators:
+                        user_prompt += "\n7. DO NOT use operators from the FORBIDDEN list"
+            
+
+                else:
+                    user_prompt += "\n\nAVAILABLE OPERATORS (use exact operator names from this list):"
+                    user_prompt += "\n" + "\n".join(operator_list)
+                    user_prompt += "\nUse the exact operator names shown above. Do not invent operators or replace them with placeholders."
+                    if forbidden_operators:
+                        user_prompt += f"\nDo not use these operators: {', '.join(forbidden_operators)}"
         # V3 Approach: Use placeholders (DATA_FIELD1, DATA_FIELD2, etc.) to avoid misspelling
         # Randomly pick a subset of fields to show Ollama
         if use_placeholder_fields and available_fields:
