@@ -694,7 +694,7 @@ Example: If the prompt lists OPERATOR1, OPERATOR2, OPERATOR3, your JSON must inc
         if progress_callback:
             progress_callback("Asking Ollama to select operators and fields...")
         
-        result = self.generate(prompt, system_prompt, temperature=0.3, max_tokens=500, progress_callback=progress_callback)
+        result = self.generate(prompt, system_prompt, temperature=0.1, max_tokens=180, progress_callback=progress_callback)
         
         if not result:
             return None
@@ -1000,17 +1000,26 @@ Example: If the prompt lists OPERATOR1, OPERATOR2, OPERATOR3, your JSON must inc
                 if progress_callback:
                     progress_callback("Asking Ollama to select operators and fields...")
                 
-                # Step 2: Ask Ollama to select operators/fields by index
-                selection = self.select_operators_and_fields_by_index(
+                # Step 2: Resolve every placeholder using Ollama's selected indices.
+                # Previously the selection response was discarded and the unresolved
+                # placeholder expression was returned, wasting the model request.
+                resolved_expression = self.replace_placeholders_with_selection(
                     placeholder_expr,
                     available_operators,
                     available_fields,
-                    progress_callback
+                    progress_callback=progress_callback,
+                    region=region
                 )
-                
-                # Return placeholder expression (will be replaced later in Step 5 or retry)
-                logger.info(f"Algorithmic generation placeholder: {placeholder_expr}")
-                return placeholder_expr
+                if not resolved_expression:
+                    logger.warning("Ollama could not resolve all expression placeholders")
+                    return None
+
+                if re.search(r'\\b(?:OPERATOR|DATA_FIELD)\\d+\\b', resolved_expression, re.IGNORECASE):
+                    logger.warning("Unresolved placeholders remain; rejecting generated expression")
+                    return None
+
+                logger.info(f"Resolved algorithmic FASTEXPR expression: {resolved_expression}")
+                return resolved_expression
                     
             except Exception as e:
                 logger.error(f"Algorithmic generation failed: {e}", exc_info=True)
