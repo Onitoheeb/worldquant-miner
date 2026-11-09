@@ -71,7 +71,8 @@ class BacktestStorage:
         log_file = f"{self.db_path}.tables_created"
         already_logged = os.path.exists(log_file)
         
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn.execute('PRAGMA busy_timeout = 30000')
         cursor = conn.cursor()
         
         cursor.execute('''
