@@ -6,6 +6,7 @@ Handles simulation submission and monitoring
 import logging
 import requests
 import time
+import threading
 from typing import Dict, Optional, List, Callable
 from dataclasses import dataclass
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -92,6 +93,9 @@ class SimulatorTester:
         self.template_generator = template_generator  # For re-authentication if needed
         self.executor = ThreadPoolExecutor(max_workers=8)
         self.active_simulations = {}  # {alpha_id: Future}
+        # Hold one permit from POST until monitoring ends. BRAIN limits concurrent
+        # simulations account-wide, so GUI worker count must not control POST rate.
+        self._submission_semaphore = threading.BoundedSemaphore(value=1)
     
     def submit_simulation(
         self, 
@@ -184,6 +188,10 @@ class SimulatorTester:
                 'regular': template
             }
             
+            # Serialize submissions and keep the permit until the corresponding
+            # monitor_simulation call finishes. This prevents concurrent POST bursts.
+            self._submission_semaphore.acquire()
+            permit_transferred_to_monitor = False
             # Use make_api_request if available, otherwise use session directly
             if self.template_generator and hasattr(self.template_generator, 'make_api_request'):
                 response = self.template_generator.make_api_request(
@@ -202,8 +210,10 @@ class SimulatorTester:
                 progress_url = response.headers.get('Location')
                 if not progress_url:
                     logger.error("No Location header in response")
+                    self._submission_semaphore.release()
                     return None
                 logger.info(f"Submitted simulation: {progress_url} for region {region}")
+                permit_transferred_to_monitor = True
                 return progress_url
             elif response.status_code == 401:
                 logger.error(f"Authentication expired - session cookies may have been lost")
@@ -211,17 +221,45 @@ class SimulatorTester:
                 return None
             else:
                 logger.error(f"Failed to submit simulation: {response.status_code} - {response.text}")
+                self._submission_semaphore.release()
                 return None
                 
         except Exception as e:
             logger.error(f"Error submitting simulation: {e}")
+            # A failed POST never transfers the permit to a monitor.
+            try:
+                self._submission_semaphore.release()
+            except ValueError:
+                pass
             return None
     
     def monitor_simulation(
-        self, 
-        progress_url: str, 
-        template: str, 
-        region: str, 
+        self,
+        progress_url: str,
+        template: str,
+        region: str,
+        settings: SimulationSettings,
+        max_wait_time: int = 300,
+        progress_callback: Optional[Callable[[float, str, str], None]] = None
+    ) -> SimulationResult:
+        """Monitor a submitted simulation and always release its concurrency permit."""
+        try:
+            return self._monitor_simulation_impl(
+                progress_url, template, region, settings,
+                max_wait_time=max_wait_time,
+                progress_callback=progress_callback
+            )
+        finally:
+            try:
+                self._submission_semaphore.release()
+            except ValueError:
+                logger.warning("Simulation concurrency permit was already released")
+
+    def _monitor_simulation_impl(
+        self,
+        progress_url: str,
+        template: str,
+        region: str,
         settings: SimulationSettings,
         max_wait_time: int = 300,
         progress_callback: Optional[Callable[[float, str, str], None]] = None
