@@ -155,14 +155,36 @@ class ResearchMemory:
                 json.dumps(operators), json.dumps(fields), timestamp,
             )
             with self._connect() as conn:
-                conn.execute("""
-                    INSERT OR IGNORE INTO research_experiments
-                    (alpha_id, template, region, success, sharpe, fitness,
-                     turnover, returns, drawdown, correlations, power_pool_corr,
-                     prod_corr, checks_json, error_message, operators_json,
-                     fields_json, timestamp)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, values)
+                existing = None
+                if alpha_id:
+                    existing = conn.execute(
+                        "SELECT id FROM research_experiments WHERE alpha_id = ? AND template = ? LIMIT 1",
+                        (alpha_id, template)
+                    ).fetchone()
+                if existing:
+                    conn.execute("""
+                        UPDATE research_experiments
+                        SET region = ?, success = ?, sharpe = ?, fitness = ?,
+                            turnover = ?, returns = ?, drawdown = ?,
+                            correlations = ?, power_pool_corr = ?, prod_corr = ?,
+                            checks_json = ?, error_message = ?, operators_json = ?,
+                            fields_json = ?, timestamp = ?
+                        WHERE id = ?
+                    """, (
+                        region, values[3], values[4], values[5], values[6],
+                        values[7], values[8], values[9], values[10], values[11],
+                        values[12], values[13], values[14], values[15],
+                        values[16], existing[0]
+                    ))
+                else:
+                    conn.execute("""
+                        INSERT OR IGNORE INTO research_experiments
+                        (alpha_id, template, region, success, sharpe, fitness,
+                         turnover, returns, drawdown, correlations, power_pool_corr,
+                         prod_corr, checks_json, error_message, operators_json,
+                         fields_json, timestamp)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, values)
             return True
         except Exception:
             logger.exception("Could not record research experiment")
