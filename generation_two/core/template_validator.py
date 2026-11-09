@@ -22,7 +22,7 @@ class TemplateValidator:
     3. Learning from simulation errors
     """
     
-    def __init__(self, operators: List[Dict] = None, data_fields: List[Dict] = None, ollama_manager=None, db_path: str = None, use_ast: bool = False):
+    def __init__(self, operators: List[Dict] = None, data_fields: List[Dict] = None, ollama_manager=None, db_path: str = None, use_ast: bool = True):
         """
         Initialize validator
         
@@ -31,7 +31,7 @@ class TemplateValidator:
             data_fields: List of data field dicts from API
             ollama_manager: Ollama manager for prompt-based correction
             db_path: Path to database for storing compiler knowledge (defaults to "generation_two_backtests.db")
-            use_ast: Whether to use AST parsing for validation (default: False - uses prompt engineering only)
+            use_ast: Whether to use AST parsing for validation (default: True - strict compiler validation)
         """
         self.use_ast = use_ast
         self.db_path = db_path or "generation_two_backtests.db"
@@ -1439,13 +1439,20 @@ FIXED EXPRESSION:"""
             CompilationResult with all compilation stages
         """
         if not self.use_ast or not self.compiler:
-            # Return a mock result if AST is disabled
+            # Never report success when no real compiler validation was performed.
             from .expression_compiler import CompilationResult, CompilerStage
+            logger.error(
+                "Strict compilation unavailable (use_ast=%s, compiler_available=%s); rejecting expression",
+                self.use_ast,
+                self.compiler is not None,
+            )
             return CompilationResult(
-                success=True,
+                success=False,
                 source_code=template,
-                final_expression=template,
-                stage_reached=CompilerStage.CODE_GEN
+                final_expression=None,
+                errors=[],
+                warnings=["Strict FASTEXPR compiler is disabled or unavailable; expression was not validated."],
+                stage_reached=CompilerStage.LEXICAL,
             )
         return self.compiler.compile(template, optimize=optimize)
     
