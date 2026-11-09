@@ -46,7 +46,7 @@ class AlgorithmicTemplateGenerator:
     @staticmethod
     def _count_placeholder_arguments(expression: str, placeholder: str) -> int:
         """Count top-level arguments supplied to a function placeholder."""
-        match = re.search(r'\\b' + re.escape(placeholder) + r'\\s*\\(', expression, re.IGNORECASE)
+        match = re.search(r'\b' + re.escape(placeholder) + r'\s*\(', expression, re.IGNORECASE)
         if not match:
             return 1
         depth = 1
