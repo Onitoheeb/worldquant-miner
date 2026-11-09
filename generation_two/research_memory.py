@@ -246,6 +246,30 @@ class ResearchMemory:
             return False
 
     @staticmethod
+    def _correlation_numbers(value):
+        """Extract plausible correlation coefficients from BRAIN correlation payloads."""
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except (TypeError, ValueError):
+                return []
+        if isinstance(value, dict):
+            numbers = []
+            for nested in value.values():
+                numbers.extend(ResearchMemory._correlation_numbers(nested))
+            return numbers
+        if isinstance(value, (list, tuple)):
+            numbers = []
+            for nested in value:
+                numbers.extend(ResearchMemory._correlation_numbers(nested))
+            return numbers
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            number = float(value)
+            if -1.0 <= number <= 1.0:
+                return [number]
+        return []
+
+    @staticmethod
     def _operator_set(template: str):
         return set(_OPERATOR_CALL.findall(template or ""))
 
@@ -276,6 +300,14 @@ class ResearchMemory:
                     "power_pool_corr": row[8] or "", "prod_corr": row[9] or "",
                     "checks": row[10] or "", "timestamp": row[11] or 0,
                 }
+                correlation_values = (
+                    self._correlation_numbers(item.get("power_pool_corr"))
+                    + self._correlation_numbers(item.get("prod_corr"))
+                )
+                item["max_abs_correlation"] = (
+                    max(abs(value) for value in correlation_values)
+                    if correlation_values else None
+                )
                 current = self._operator_set(item["template"])
                 # Avoid filling the context with near-identical operator families.
                 too_similar = False
@@ -341,6 +373,11 @@ class ResearchMemory:
                         + "; production="
                         + str(item.get("prod_corr", ""))[:350]
                     )
+                if item.get("max_abs_correlation") is not None:
+                    sections.append(
+                        f"   Maximum absolute reported correlation: "
+                        f"{item['max_abs_correlation']:.3f} (lower is preferable for diversity)"
+                    )
                 if item.get("checks"):
                     sections.append("   BRAIN checks: " + str(item["checks"])[:500])
         if failures:
@@ -377,7 +414,7 @@ class ResearchMemory:
             f"Act as a quantitative research scientist. Develop {count} new alpha "
             f"experiments for region {region}. Start from the measured candidates "
             "below, identify the economic signal behind them, then explore "
-            "meaningfully different hypotheses and transformations. Do not merely "
+            "meaningfully different hypotheses and transformations, favouring lower reported correlations where available. Do not merely "
             "change constants or wrap the same expression in another operator. "
             "Avoid near-duplicates and explain the hypothesis each expression tests. "
             "Use only supplied fields and operators; never assume unsupported "
