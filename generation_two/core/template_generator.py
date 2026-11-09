@@ -6,6 +6,7 @@ Handles alpha expression generation using AI/LLM with smart Ollama integration
 import logging
 import requests
 import json
+import re
 from typing import List, Dict, Optional
 import time
 
