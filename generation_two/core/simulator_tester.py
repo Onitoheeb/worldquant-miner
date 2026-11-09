@@ -114,6 +114,7 @@ class SimulatorTester:
         Returns:
             Progress URL if successful, None otherwise
         """
+        permit_acquired = False
         try:
             import re
             from dataclasses import asdict
@@ -191,6 +192,7 @@ class SimulatorTester:
             # Serialize submissions and keep the permit until the corresponding
             # monitor_simulation call finishes. This prevents concurrent POST bursts.
             self._submission_semaphore.acquire()
+            permit_acquired = True
             # Retry only explicit concurrency-limit rejections. A 429 response
             # means this POST was rejected, so retrying cannot create a duplicate alpha.
             response = None
@@ -221,26 +223,29 @@ class SimulatorTester:
                 if not progress_url:
                     logger.error("No Location header in response")
                     self._submission_semaphore.release()
+                    permit_acquired = False
                     return None
                 logger.info(f"Submitted simulation: {progress_url} for region {region}")
+                # The monitor wrapper now owns responsibility for releasing it.
+                permit_acquired = False
                 return progress_url
             elif response.status_code == 401:
                 logger.error(f"Authentication expired - session cookies may have been lost")
                 logger.error(f"Response: {response.text}")
                 self._submission_semaphore.release()
+                permit_acquired = False
                 return None
             else:
                 logger.error(f"Failed to submit simulation: {response.status_code} - {response.text}")
                 self._submission_semaphore.release()
+                permit_acquired = False
                 return None
                 
         except Exception as e:
             logger.error(f"Error submitting simulation: {e}")
             # A failed POST never transfers the permit to a monitor.
-            try:
+            if permit_acquired:
                 self._submission_semaphore.release()
-            except ValueError:
-                pass
             return None
     
     def monitor_simulation(
