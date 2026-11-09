@@ -386,12 +386,10 @@ class SimulatorTester:
                             timestamp=time.time()
                         )
                     
-                    # Learn from simulation error if template_generator has validator
-                    if self.template_generator and hasattr(self.template_generator, 'template_validator'):
-                        validator = self.template_generator.template_validator
-                        if validator:
-                            validator.learn_from_simulation_error(template, "No alpha ID in response")
-                    
+                    # Do not record a successful alpha-ID extraction as a simulation error.
+                    # The previous implementation incorrectly taught the validator that every
+                    # completed simulation had "No alpha ID in response" before fetching alpha details.
+
                     # Get alpha details from the alpha endpoint
                     if self.template_generator and hasattr(self.template_generator, 'make_api_request'):
                         alpha_response = self.template_generator.make_api_request(
