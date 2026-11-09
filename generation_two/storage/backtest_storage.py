@@ -303,6 +303,14 @@ class BacktestStorage:
             conn.commit()
             conn.close()
             
+            # Mirror the exact observed simulation outcome into persistent research memory.
+            # This is observation-only: it never infers operator compatibility or submits work.
+            try:
+                from ..evolution.research_memory import ResearchMemory
+                ResearchMemory(self.db_path).record_result(result)
+            except Exception as memory_error:
+                logger.warning("Could not update research memory: %s", memory_error)
+
             logger.debug(f"Stored backtest result: {template[:50]}... (Sharpe={sharpe:.3f})")
             return True
             
