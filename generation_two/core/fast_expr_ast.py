@@ -83,15 +83,18 @@ class FASTEXPRParser:
         '&&': 0, '||': 0,
     }
     
-    def __init__(self, operators: List[Dict] = None, data_fields: List[Dict] = None):
+    def __init__(
+        self,
+        operators: List[Dict] = None,
+        data_fields: List[Dict] = None,
+        alpha_type: str = "REGULAR"
+    ):
         """
-        Initialize parser with operators and data fields
-        
-        Args:
-            operators: List of operator dicts from operatorRAW.json
-            data_fields: List of data field dicts from API
+        Initialize parser with operators, data fields, and the BRAIN alpha type.
+        Generation Two submits REGULAR alphas by default.
         """
-        self.operators: Dict[str, Dict] = {}
+        self.alpha_type = (alpha_type or "REGULAR").upper()
+        self.operators: Dict[str, Dict] = {};
         self.operator_scopes: Dict[str, Set[str]] = {}  # operator_name -> {REGULAR, MATRIX, VECTOR}
         self.vec_operators: Set[str] = set()  # Operators that start with vec_
         self.data_fields: Dict[str, Dict] = {}
@@ -393,9 +396,19 @@ class FASTEXPRParser:
                     operator_name=operator_name
                 ))
             else:
-                # Get operator scope
+                # Operator scope identifies the BRAIN alpha type in which this
+                # operator is available; it is not a field type.
                 operator_scope = self.operator_scopes.get(operator_name, set())
-                
+                if operator_scope and self.alpha_type not in operator_scope:
+                    errors.append(SyntaxError(
+                        'invalid_operator',
+                        f'Operator {operator_name} is not available for {self.alpha_type} alphas (scope: {sorted(operator_scope)})',
+                        ast.position,
+                        template,
+                        operator_name=operator_name
+                    ))
+                    return errors
+
                 # Validate arguments (fields)
                 for child in ast.children:
                     child_errors = self._validate_ast(child, template)
