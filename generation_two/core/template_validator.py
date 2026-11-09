@@ -966,14 +966,14 @@ FIXED EXPRESSION:"""
                 if ("unknown operator" in error_message.lower() or
                         ("inaccessible" in error_message.lower() and "operator" in error_message.lower())):
                     rejected_match = re.search(
-                        r'(?:unknown|inaccessible).*?operator\\s+["\\']?(\\w+)',
+                        r'(?:unknown|inaccessible).*?operator\s+"?(\w+)',
                         error_message,
                         re.IGNORECASE,
                     )
                     if rejected_match:
                         rejected_operator = rejected_match.group(1)
                         if re.search(
-                            r'\\b' + re.escape(rejected_operator) + r'\\s*\\(',
+                            r'\b' + re.escape(rejected_operator) + r'\s*\(',
                             current_template,
                             re.IGNORECASE,
                         ):
