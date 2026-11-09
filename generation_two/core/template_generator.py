@@ -14,6 +14,7 @@ from ..ollama import OllamaManager, RegionThemeManager
 from ..ollama.duplicate_detector import DuplicateDetector
 from ..data_fetcher import OperatorFetcher, DataFieldFetcher, SmartSearchEngine
 from .template_validator import TemplateValidator
+from ..evolution.research_memory import ResearchMemory
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,8 @@ class TemplateGenerator:
         self._stored_credentials = credentials  # Store credentials in memory for re-authentication
         self.deepseek_api_key = deepseek_api_key
         self.db_path = db_path
+        # Persistent, evidence-grounded memory shared with simulation storage.
+        self.research_memory = ResearchMemory(db_path)
         # Create session with cookie persistence enabled (default, but explicit)
         self.sess = requests.Session()
         # Ensure cookies are maintained across requests
@@ -284,6 +287,11 @@ class TemplateGenerator:
         Returns:
             Alpha expression string or None
         """
+        # Feed measured BRAIN outcomes back into every research/generation cycle.
+        research_context = self.research_memory.build_research_context(region)
+        if research_context:
+            prompt = f"{prompt}\n\n{research_context}"
+
         # Get theme requirements
         theme_requirements = self.theme_manager.get_theme_requirements(region)
         dataset_categories = self.theme_manager.get_required_categories(region)
@@ -514,6 +522,7 @@ class TemplateGenerator:
         Returns:
             List of alpha expressions
         """
+        self.research_memory.record_hypothesis(hypothesis, region)
         prompt = f"""
         Hypothesis: {hypothesis}
         Available data fields: {', '.join(data_fields[:10])}
