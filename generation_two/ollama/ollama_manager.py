@@ -768,17 +768,25 @@ Example: If the prompt lists OPERATOR1, OPERATOR2, OPERATOR3, your JSON must inc
             missing_fields = [field for field in required_fields if field not in selection.get('fields', {})]
             
             if missing_operators or missing_fields:
-                logger.warning(f"⚠️ Ollama did not select all required placeholders!")
-                if missing_operators:
-                    logger.warning(f"   Missing operators: {missing_operators}")
-                if missing_fields:
-                    logger.warning(f"   Missing fields: {missing_fields}")
+                logger.warning("Ollama selection is incomplete; rejecting this candidate instead of substituting unrelated values.")
+                logger.warning(f"   Missing operators: {missing_operators}")
+                logger.warning(f"   Missing fields: {missing_fields}")
                 logger.warning(f"   Required operators: {required_ops}")
                 logger.warning(f"   Required fields: {required_fields}")
-                logger.warning(f"   Received (after filtering): {selection}")
-                # Don't return None - we'll try to work with what we have, but log the issue
-            
-            # Validate structure
+                logger.warning(f"   Received after filtering: {selection}")
+                return None
+
+            # Reject invalid indices before they can reach replacement logic.
+            for placeholder, index in selection.get('operators', {}).items():
+                if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < len(available_operators):
+                    logger.warning(f"Invalid operator index for {placeholder}: {index!r}")
+                    return None
+            for placeholder, index in selection.get('fields', {}).items():
+                if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < len(available_fields):
+                    logger.warning(f"Invalid data-field index for {placeholder}: {index!r}")
+                    return None
+
+            # Validate structure only after completeness and index checks.
             if 'operators' in selection and 'fields' in selection:
                 return selection
             else:
@@ -1020,10 +1028,10 @@ Example: If the prompt lists OPERATOR1, OPERATOR2, OPERATOR3, your JSON must inc
 
                 logger.info(f"Resolved algorithmic FASTEXPR expression: {resolved_expression}")
                 return resolved_expression
-                    
+
             except Exception as e:
-                logger.error(f"Algorithmic generation failed: {e}", exc_info=True)
-                # Fall through to old method
+                logger.error(f"Algorithmic generation failed; rejecting candidate rather than falling through to unconstrained generation: {e}", exc_info=True)
+                return None
         
         # OLD APPROACH: Direct Ollama generation (fallback)
         system_prompt = """You are an expert in quantitative finance and WorldQuant Brain alpha generation.
