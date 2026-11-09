@@ -558,7 +558,18 @@ class Step5Simulation:
                             max_wait_time=300,  # 5 minutes max
                             progress_callback=progress_callback
                         )
-                        
+
+                        # Feed every observed BRAIN outcome into persistent research memory.
+                        try:
+                            research_memory = getattr(
+                                self.workflow.generator.template_generator,
+                                "research_memory", None
+                            )
+                            if research_memory:
+                                research_memory.record_result(result)
+                        except Exception as memory_error:
+                            logger.warning("Could not record BRAIN research outcome: %s", memory_error)
+
                         if result.success:
                             completed_count['successful'] += 1
                             # Ensure alpha_id is a string, not a tuple or list
@@ -719,7 +730,17 @@ class Step5Simulation:
                                                 max_wait_time=300,
                                                 progress_callback=progress_callback
                                             )
-                                            
+
+                                            try:
+                                                research_memory = getattr(
+                                                    self.workflow.generator.template_generator,
+                                                    "research_memory", None
+                                                )
+                                                if research_memory:
+                                                    research_memory.record_result(result_retry)
+                                            except Exception as memory_error:
+                                                logger.warning("Could not record retry research outcome: %s", memory_error)
+
                                             if result_retry.success:
                                                 completed_count['successful'] += 1
                                                 # Ensure alpha_id is a string, not a tuple or list
