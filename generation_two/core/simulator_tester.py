@@ -73,6 +73,9 @@ class SimulationResult:
 
 
 class SimulatorTester:
+    # Shared across instances: BRAIN enforces the concurrency limit per account.
+    _submission_semaphore = threading.BoundedSemaphore(value=1)
+
     """
     Handles simulation submission and monitoring
     
@@ -93,9 +96,10 @@ class SimulatorTester:
         self.template_generator = template_generator  # For re-authentication if needed
         self.executor = ThreadPoolExecutor(max_workers=8)
         self.active_simulations = {}  # {alpha_id: Future}
-        # Hold one permit from POST until monitoring ends. BRAIN limits concurrent
-        # simulations account-wide, so GUI worker count must not control POST rate.
-        self._submission_semaphore = threading.BoundedSemaphore(value=1)
+        # BRAIN's concurrency limit is account-wide, not per GUI worker or tester.
+        # A class-level semaphore serializes submissions across every SimulatorTester
+        # instance created by Step 5 workers.
+
     
     def submit_simulation(
         self, 
@@ -191,7 +195,7 @@ class SimulatorTester:
             
             # Serialize submissions and keep the permit until the corresponding
             # monitor_simulation call finishes. This prevents concurrent POST bursts.
-            self._submission_semaphore.acquire()
+            type(self)._submission_semaphore.acquire()
             permit_acquired = True
             # Retry only explicit concurrency-limit rejections. A 429 response
             # means this POST was rejected, so retrying cannot create a duplicate alpha.
@@ -222,7 +226,7 @@ class SimulatorTester:
                 progress_url = response.headers.get('Location')
                 if not progress_url:
                     logger.error("No Location header in response")
-                    self._submission_semaphore.release()
+                    type(self)._submission_semaphore.release()
                     permit_acquired = False
                     return None
                 logger.info(f"Submitted simulation: {progress_url} for region {region}")
