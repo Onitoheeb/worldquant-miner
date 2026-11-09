@@ -364,7 +364,8 @@ The expression should combine OPERATORS (functions like ts_rank, ts_delta, rank)
 
 Generate a valid FASTEXPR expression that uses operator(data_field, parameters) syntax."""
                     
-                    # Update progress ONCE before Ollama call (no updates during call to prevent freeze)
+                    # Update progress before algorithmic template generation.
+                    # Step 4 currently does not call Ollama; it creates placeholders locally.
                     if self.gen_slot_manager:
                         slot = self.gen_slot_manager.get_slot_status(primary_slot_id)
                         slot.update_progress(25.0, "Calling Ollama API...", "")
@@ -682,9 +683,12 @@ Generate a valid FASTEXPR expression that uses operator(data_field, parameters) 
                     if (template_index + 1) % 3 == 0:
                         logger.info(f"[Step 4] Slot {primary_slot_id+1}: ✅ Template {template_index+1} completed")
                     
-                    # Update templates list (throttled - only update every few templates)
-                    if len(generated_templates) % 3 == 0 or len(generated_templates) == completed_count['total']:
-                        self.workflow.frame.after_idle(lambda: self._update_templates_list(generated_templates))
+                    # Publish every successful template immediately so users can see
+                    # progress without waiting for a batch of three or coordinator exit.
+                    snapshot = list(generated_templates)
+                    self.workflow.frame.after_idle(
+                        lambda items=snapshot: self._update_templates_list(items)
+                    )
                 
                 except Exception as e:
                     # Release operators back to pool on error
@@ -753,13 +757,17 @@ Generate a valid FASTEXPR expression that uses operator(data_field, parameters) 
                     
                     # Wait for all generations to complete (non-blocking check)
                     # Don't use join() as it can block - just check if threads are alive
-                    max_wait_time = 600  # 10 minutes max
-                    start_wait = time.time()
-                    while self.generation_running and (time.time() - start_wait) < max_wait_time:
-                        alive_threads = [t for t in self.generation_threads if t.is_alive()]
-                        if not alive_threads:
+                    # Wait only for worker threads. The coordinator must never
+                    # wait for itself, otherwise this loop runs until the 10-minute timeout.
+                    current_thread = threading.current_thread()
+                    while self.generation_running:
+                        alive_workers = [
+                            thread for thread in self.generation_threads
+                            if thread is not current_thread and thread.is_alive()
+                        ]
+                        if not alive_workers:
                             break
-                        time.sleep(1)  # Check every second
+                        time.sleep(0.25)
                     
                     # Final update (batched to reduce GUI calls)
                     def final_updates():
