@@ -512,16 +512,17 @@ class OllamaManager:
                     else:
                         logger.warning(f"Attempt {attempt + 1}: ⚠️ Ollama returned empty response")
                 
-                # Fallback to requests if ollama didn't work or wasn't available
-                if not generated_text:
-                    logger.debug(f"Attempt {attempt + 1}: Trying requests fallback to {self.base_url}/api/chat")
+                # Use the requests transport only when the Ollama Python client is unavailable.
+                # If the client has already attempted generation and timed out, sending the
+                # same prompt again through HTTP doubles load on a local model (often 32B).
+                if not generated_text and not chat_func:
+                    logger.debug(f"Attempt {attempt + 1}: Ollama library unavailable; trying requests transport")
                     if progress_callback:
                         try:
-                            progress_callback("Using requests fallback...")
+                            progress_callback("Using requests transport...")
                         except Exception:
                             pass
-                    
-                    # Ensure session exists for requests fallback
+
                     if not self.session:
                         try:
                             import requests
@@ -529,10 +530,14 @@ class OllamaManager:
                             logger.debug("Created requests session for fallback")
                         except Exception as session_err:
                             logger.error(f"Failed to create requests session: {session_err}")
-                            continue  # Skip this attempt
-                    
+                            continue
+
                     generated_text = call_ollama_requests(
                         self.session, self.base_url, self.model, messages, temperature, max_tokens, self.timeout
+                    )
+                elif not generated_text and chat_func:
+                    logger.warning(
+                        "Ollama library generation failed; skipping duplicate requests call and moving to retry"
                     )
                 
                 if generated_text:
