@@ -460,14 +460,14 @@ REQUIRED OPERATOR PLACEHOLDERS (you MUST select all {num_operators_needed}):
 REQUIRED FIELD PLACEHOLDERS (you MUST select all {num_fields_needed}):
 {field_placeholder_list}
 
-CRITICAL RULES:
-1. ONLY return index numbers (like 0, 5, 12, 23) - DO NOT write operator names or field names
-2. Use UPPERCASE placeholder names as keys: OPERATOR1, OPERATOR2, DATA_FIELD1, DATA_FIELD2
-3. You MUST include ALL placeholders listed above in your JSON response - missing any placeholder will cause an error
-4. Map each placeholder to an INDEX NUMBER from the lists below
-5. Select DIFFERENT field indices for different DATA_FIELD placeholders when possible
-6. **PRIORITIZE DIVERSITY**: Choose fields that are different from recently used ones - avoid repetitive selections
-7. If an operator shows "at least N" inputs, the template structure should already provide enough inputs
+STRICT OUTPUT CONTRACT (follow exactly):
+1. Return exactly ONE valid JSON object. No markdown fences, prose, comments, or trailing text.
+2. The only permitted top-level keys are "operators" and "fields".
+3. Under "operators", include EVERY required operator placeholder, spelled exactly as listed, as a key.
+4. Under "fields", include EVERY required field placeholder, spelled exactly as listed, as a key.
+5. Every value MUST be an integer index that appears in the corresponding available list. Never return an operator name, field name, category, or invented key.
+6. Do not omit a required key. Do not add keys that are not required.
+7. Select distinct field indices where possible.
 
 AVAILABLE OPERATORS (randomly shuffled - select by INDEX number in brackets):
 {chr(10).join(operator_list)}
