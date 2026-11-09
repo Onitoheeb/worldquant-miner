@@ -547,23 +547,36 @@ FIXED EXPRESSION:"""
                 # Extract expression from response
                 fixed = self._extract_expression_from_response(response)
                 
-                # Step 3: Validate and retry if needed
+                # Step 3: Validate the candidate before accepting it. A short
+                # model response such as "fixed_exp_expr" is not an expression
+                # and must never become the next refeed candidate.
                 if fixed and fixed != template:
-                    # Quick validation: check parentheses balance
                     open_parens = fixed.count('(')
                     close_parens = fixed.count(')')
-                    if open_parens == close_parens:
-                        logger.info(f"✅ AI agent fixed template (diagnosis: {diagnosis[:50] if diagnosis else 'N/A'})")
-                        return fixed, ["AI agent fix with diagnosis"]
-                    else:
-                        # Retry with balance fix
-                        logger.debug(f"Retrying fix - parentheses unbalanced: {open_parens} open, {close_parens} close")
+                    if open_parens != close_parens:
+                        logger.debug(
+                            "Rejecting repair response with unbalanced parentheses: %s open, %s close",
+                            open_parens,
+                            close_parens
+                        )
                         if open_parens > close_parens:
                             fixed = fixed + ')' * (open_parens - close_parens)
-                        elif close_parens > open_parens:
+                        else:
                             fixed = '(' * (close_parens - open_parens) + fixed
-                        logger.info(f"✅ AI agent fixed template (with balance correction)")
-                        return fixed, ["AI agent fix with balance correction"]
+
+                    compile_result = self.compile_template(fixed, optimize=False)
+                    if compile_result.success:
+                        logger.info("AI repair passed FASTEXPR compilation")
+                        return fixed, ["AI agent repair passed compiler validation"]
+
+                    repair_errors = [
+                        getattr(error, "message", str(error))
+                        for error in (compile_result.errors or [])
+                    ]
+                    logger.warning(
+                        "Rejecting AI repair because FASTEXPR compilation failed: %s",
+                        repair_errors[:3]
+                    )
         except Exception as e:
             logger.warning(f"AI agent fix failed: {e}")
         
