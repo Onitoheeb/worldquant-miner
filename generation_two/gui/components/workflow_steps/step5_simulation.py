@@ -535,7 +535,7 @@ class Step5Simulation:
                     progress_url = simulator.submit_simulation(template, template_region, settings)
                     
                     if progress_url:
-                        self.slot_manager.update_slot_progress(primary_slot_id, progress_url, f"✅ Submitted: {progress_url}")
+                        self.slot_manager.update_slot_progress(primary_slot_id, progress_url=progress_url, message=f"✅ Submitted: {progress_url}")
                         self._log_to_slot(primary_slot_id, f"✅ Submitted: {progress_url}")
                         self._log_result(f"[{template_index+1}/{len(templates)}] ✅ Submitted: {template[:50]}...\n")
                         
