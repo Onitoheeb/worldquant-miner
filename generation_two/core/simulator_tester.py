@@ -267,20 +267,34 @@ class SimulatorTester:
                     continue
                 
                 data = response.json()
-                status = data.get('status', 'UNKNOWN')
-                
-                # Calculate elapsed time once
+                status = str(data.get('status', 'UNKNOWN')).upper()
+
+                # BRAIN commonly reports progress as a fraction and signals completion
+                # by returning an alpha ID, rather than a textual status field.
                 elapsed = time.time() - start_time
-                
-                # Handle empty or missing status - treat as PENDING if just submitted
-                if status == 'UNKNOWN' or not status:
-                    # If we just started monitoring (elapsed < 10s), treat as PENDING
-                    if elapsed < 10:
+                raw_progress = data.get('progress')
+                api_progress = None
+                if isinstance(raw_progress, (int, float)):
+                    api_progress = float(raw_progress)
+                    if 0.0 <= api_progress <= 1.0:
+                        api_progress *= 100.0
+                    api_progress = max(0.0, min(100.0, api_progress))
+
+                if data.get('alpha'):
+                    status = 'COMPLETE'
+                elif status in ('UNKNOWN', ''):
+                    if api_progress is not None:
+                        status = 'RUNNING' if api_progress > 0 else 'PENDING'
+                        logger.debug(
+                            f"Simulation API progress={raw_progress!r}; interpreted status={status}"
+                        )
+                    elif elapsed < 10:
                         status = 'PENDING'
-                        logger.debug(f"Status missing/unknown in API response, treating as PENDING (elapsed: {elapsed:.1f}s)")
+                        logger.debug(
+                            f"Status missing in early simulation response; treating as PENDING (elapsed: {elapsed:.1f}s)"
+                        )
                     else:
-                        # Log the actual response for debugging
-                        logger.warning(f"Unknown status in API response: {data}")
+                        logger.warning(f"Simulation response has no status/progress/alpha: {data}")
                 
                 # Calculate progress based on status and elapsed time
                 if status == 'COMPLETE':
@@ -294,12 +308,14 @@ class SimulatorTester:
                     progress_percent = min(15.0, (elapsed / max_wait_time) * 15)
                     progress_msg = f"⏳ Simulation pending... ({int(elapsed)}s)"
                 elif status == 'RUNNING' or status == 'IN_PROGRESS' or status == 'PROCESSING':
-                    # Estimate progress: assume simulations take 30-120 seconds typically
-                    # Use elapsed time as rough estimate, but show more granular progress
-                    base_progress = 15.0  # Start at 15% after submission
-                    time_based_progress = min(85.0, (elapsed / max_wait_time) * 70)  # Use 70% of range for time-based
-                    progress_percent = min(95.0, base_progress + time_based_progress)
-                    progress_msg = f"🔄 Simulation running... ({int(elapsed)}s elapsed)"
+                    # Prefer the API's actual progress value when present; otherwise estimate.
+                    if api_progress is not None:
+                        progress_percent = min(99.0, api_progress)
+                    else:
+                        base_progress = 15.0
+                        time_based_progress = min(85.0, (elapsed / max_wait_time) * 70)
+                        progress_percent = min(95.0, base_progress + time_based_progress)
+                    progress_msg = f"🔄 Simulation running... {progress_percent:.0f}% ({int(elapsed)}s elapsed)"
                 else:
                     # Unknown status, estimate based on time
                     # Log it for debugging but treat as PENDING if early, RUNNING if later
