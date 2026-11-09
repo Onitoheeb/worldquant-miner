@@ -12,6 +12,7 @@ import logging
 import re
 import sqlite3
 import time
+from contextlib import contextmanager
 from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -31,10 +32,15 @@ class ResearchMemory:
         self.db_path = db_path
         self._create_tables()
 
+    @contextmanager
     def _connect(self):
         conn = sqlite3.connect(self.db_path, timeout=30)
         conn.execute("PRAGMA busy_timeout = 30000")
-        return conn
+        try:
+            yield conn
+            conn.commit()
+        finally:
+            conn.close()
 
     def _create_tables(self):
         with self._connect() as conn:
