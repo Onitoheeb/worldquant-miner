@@ -382,6 +382,12 @@ class AlgorithmicTemplateGenerator:
             metadata = self.operator_metadata.get(name)
             if not name or not metadata:
                 continue
+            # Vector operators require VECTOR-typed inputs. The current placeholder
+            # selector chooses field placeholders independently of AST argument
+            # types, so admitting vec_* here creates invalid MATRIX/VECTOR pairings.
+            # Keep these out until selection is type-directed at each AST leaf.
+            if name.lower().startswith('vec_'):
+                continue
             scopes = {str(scope).upper() for scope in (metadata.scope or [])}
             if scopes and active_alpha_type not in scopes:
                 continue
