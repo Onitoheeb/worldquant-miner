@@ -468,19 +468,19 @@ class Step5Simulation:
                                                 self._log_to_slot(primary_slot_id, f"❌ FAILED: Still has placeholders after retry: {remaining_ops + remaining_fields}")
                                                 self._log_to_slot(primary_slot_id, f"❌ Skipping submission - template: {template[:100]}...")
                                                 # Mark as failed and skip submission
-                                                self.slot_manager.update_slot_status(slot_ids, "FAILED", f"Placeholders not replaced: {remaining_ops + remaining_fields}")
+                                                self.slot_manager.release_slots(slot_ids, success=False, error=f"Placeholders not replaced: {remaining_ops + remaining_fields}")
                                                 return
                                             else:
                                                 self._log_to_slot(primary_slot_id, "✅ All placeholders replaced after retry")
                                         else:
                                             self._log_to_slot(primary_slot_id, "❌ Retry replacement failed, skipping submission")
-                                            self.slot_manager.update_slot_status(slot_ids, "FAILED", "Placeholder replacement failed")
+                                            self.slot_manager.release_slots(slot_ids, success=False, error="Placeholder replacement failed")
                                             return
                                     else:
                                         self._log_to_slot(primary_slot_id, "✅ Ollama selection completed, all placeholders replaced")
                                 else:
                                     self._log_to_slot(primary_slot_id, "❌ Ollama selection failed; rejecting this candidate without fallback substitution")
-                                    # Fallback to old method
+                                    # Strict mode: do not use independent placeholder fallback
                                     if has_operator_placeholders:
                                         pass  # Strict mode: never substitute an independent random operator/field list
                                     if has_field_placeholders:
@@ -490,11 +490,11 @@ class Step5Simulation:
                                     remaining_ops = re.findall(r'\b(OPERATOR\d+|operator\d+|Operator\d+)\b', template, re.IGNORECASE)
                                     remaining_fields = re.findall(r'\b(DATA_FIELD\d+|data_field\d+|Data_Field\d+)\b', template, re.IGNORECASE)
                                     if remaining_ops or remaining_fields:
-                                        self._log_to_slot(primary_slot_id, f"❌ FAILED: Fallback replacement incomplete. Remaining: {remaining_ops + remaining_fields}")
-                                        self.slot_manager.update_slot_status(slot_ids, "FAILED", f"Placeholders not replaced: {remaining_ops + remaining_fields}")
+                                        self._log_to_slot(primary_slot_id, f"❌ FAILED: Strict placeholder resolution incomplete. Remaining: {remaining_ops + remaining_fields}")
+                                        self.slot_manager.release_slots(slot_ids, success=False, error=f"Placeholders not replaced: {remaining_ops + remaining_fields}")
                                         return
                             else:
-                                # Fallback to old method
+                                # Strict mode: do not use independent placeholder fallback
                                 if has_operator_placeholders and available_operators:
                                     pass  # Strict mode: never substitute an independent random operator/field list
                                 if has_field_placeholders and available_fields:
@@ -510,7 +510,7 @@ class Step5Simulation:
                         self._log_to_slot(primary_slot_id, f"   Remaining operators: {remaining_ops}")
                         self._log_to_slot(primary_slot_id, f"   Remaining fields: {remaining_fields}")
                         self._log_to_slot(primary_slot_id, f"   Template: {template[:100]}...")
-                        self.slot_manager.update_slot_status(slot_ids, "FAILED", f"Cannot submit: placeholders remain ({remaining_ops + remaining_fields})")
+                        self.slot_manager.release_slots(slot_ids, success=False, error=f"Cannot submit: placeholders remain ({remaining_ops + remaining_fields})")
                         self._log_to_slot(primary_slot_id, "❌ Skipping submission - template has unreplaced placeholders")
                         return
                     
