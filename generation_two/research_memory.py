@@ -57,6 +57,9 @@ class ResearchMemory:
                     returns REAL DEFAULT 0,
                     drawdown REAL DEFAULT 0,
                     correlations TEXT DEFAULT '',
+                    power_pool_corr TEXT DEFAULT '',
+                    prod_corr TEXT DEFAULT '',
+                    checks_json TEXT DEFAULT '',
                     error_message TEXT DEFAULT '',
                     operators_json TEXT DEFAULT '[]',
                     fields_json TEXT DEFAULT '[]',
@@ -78,6 +81,14 @@ class ResearchMemory:
                     created_at REAL NOT NULL
                 )
             """)
+            existing_columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(research_experiments)")
+            }
+            for column_name in ("power_pool_corr", "prod_corr", "checks_json"):
+                if column_name not in existing_columns:
+                    conn.execute(
+                        f"ALTER TABLE research_experiments ADD COLUMN {column_name} TEXT DEFAULT ''"
+                    )
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS research_catalogue_snapshots (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -121,8 +132,15 @@ class ResearchMemory:
             alpha_id = str(self._value(result, "alpha_id", "") or "")
             operators, fields = self._extract_expression_components(template)
             correlations = self._value(result, "correlations", "") or ""
-            if not isinstance(correlations, str):
-                correlations = json.dumps(correlations, default=str)
+            power_pool_corr = self._value(result, "power_pool_corr", "") or ""
+            prod_corr = self._value(result, "prod_corr", "") or ""
+            checks = self._value(result, "checks", "") or ""
+            def serialize(value):
+                return value if isinstance(value, str) else json.dumps(value, default=str)
+            correlations = serialize(correlations)
+            power_pool_corr = serialize(power_pool_corr)
+            prod_corr = serialize(prod_corr)
+            checks = serialize(checks)
 
             values = (
                 alpha_id, template, region,
@@ -132,7 +150,7 @@ class ResearchMemory:
                 float(self._value(result, "turnover", 0) or 0),
                 float(self._value(result, "returns", 0) or 0),
                 float(self._value(result, "drawdown", 0) or 0),
-                correlations,
+                correlations, power_pool_corr, prod_corr, checks,
                 str(self._value(result, "error_message", "") or "")[:2000],
                 json.dumps(operators), json.dumps(fields), timestamp,
             )
@@ -140,9 +158,10 @@ class ResearchMemory:
                 conn.execute("""
                     INSERT OR IGNORE INTO research_experiments
                     (alpha_id, template, region, success, sharpe, fitness,
-                     turnover, returns, drawdown, correlations, error_message,
-                     operators_json, fields_json, timestamp)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     turnover, returns, drawdown, correlations, power_pool_corr,
+                     prod_corr, checks_json, error_message, operators_json,
+                     fields_json, timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, values)
             return True
         except Exception:
