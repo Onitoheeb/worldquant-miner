@@ -191,21 +191,31 @@ class SimulatorTester:
             # Serialize submissions and keep the permit until the corresponding
             # monitor_simulation call finishes. This prevents concurrent POST bursts.
             self._submission_semaphore.acquire()
-            permit_transferred_to_monitor = False
-            # Use make_api_request if available, otherwise use session directly
-            if self.template_generator and hasattr(self.template_generator, 'make_api_request'):
-                response = self.template_generator.make_api_request(
-                    'POST',
-                    'https://api.worldquantbrain.com/simulations',
-                    json=simulation_data
-                )
-            else:
-                # Fallback to direct session usage (maintains backward compatibility)
-                response = self.sess.post(
-                    'https://api.worldquantbrain.com/simulations',
-                    json=simulation_data
-                )
-            
+            # Retry only explicit concurrency-limit rejections. A 429 response
+            # means this POST was rejected, so retrying cannot create a duplicate alpha.
+            response = None
+            for attempt in range(6):
+                if self.template_generator and hasattr(self.template_generator, 'make_api_request'):
+                    response = self.template_generator.make_api_request(
+                        'POST',
+                        'https://api.worldquantbrain.com/simulations',
+                        json=simulation_data
+                    )
+                else:
+                    response = self.sess.post(
+                        'https://api.worldquantbrain.com/simulations',
+                        json=simulation_data
+                    )
+                if response.status_code != 429 or "CONCURRENT_SIMULATION_LIMIT_EXCEEDED" not in (response.text or ""):
+                    break
+                if attempt < 5:
+                    wait_seconds = min(30, 5 * (attempt + 1))
+                    logger.warning(
+                        "BRAIN concurrent simulation limit reached; retrying in %ss (%s/5)",
+                        wait_seconds, attempt + 1
+                    )
+                    time.sleep(wait_seconds)
+
             if response.status_code == 201:
                 progress_url = response.headers.get('Location')
                 if not progress_url:
@@ -213,11 +223,11 @@ class SimulatorTester:
                     self._submission_semaphore.release()
                     return None
                 logger.info(f"Submitted simulation: {progress_url} for region {region}")
-                permit_transferred_to_monitor = True
                 return progress_url
             elif response.status_code == 401:
                 logger.error(f"Authentication expired - session cookies may have been lost")
                 logger.error(f"Response: {response.text}")
+                self._submission_semaphore.release()
                 return None
             else:
                 logger.error(f"Failed to submit simulation: {response.status_code} - {response.text}")
