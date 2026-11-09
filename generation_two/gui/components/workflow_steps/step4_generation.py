@@ -364,6 +364,104 @@ The expression should combine OPERATORS (functions like ts_rank, ts_delta, rank)
 
 Generate a valid FASTEXPR expression that uses operator(data_field, parameters) syntax."""
                     
+                    # Research-led path: let the LLM propose a complete expression using
+                    # measured BRAIN research memory. Keep the algorithmic placeholder
+                    # generator as a fallback when Ollama is unavailable or its output
+                    # fails strict local compilation.
+                    template_generator = self.workflow.generator.template_generator
+                    ollama_manager = getattr(template_generator, "ollama_manager", None)
+                    if ollama_manager and getattr(ollama_manager, "is_available", False):
+                        try:
+                            research_memory = getattr(template_generator, "research_memory", None)
+                            research_prompt = (
+                                research_memory.build_evolution_prompt(region, count=1)
+                                if research_memory else
+                                f"Develop one testable quantitative alpha hypothesis for {region}."
+                            )
+                            llm_prompt = (
+                                f"{research_prompt}\\n\\n"
+                                "Generate exactly ONE FASTEXPR expression using only the "
+                                "operator and data-field catalogues supplied to you. "
+                                "Do not return explanations, markdown, placeholders, or "
+                                "multiple alternatives. Prefer a distinct research idea "
+                                "over a cosmetic mutation."
+                            )
+                            if self.gen_slot_manager:
+                                slot = self.gen_slot_manager.get_slot_status(primary_slot_id)
+                                slot.update_progress(28.0, "LLM research and hypothesis generation...", "")
+                                slot.add_log("LLM is researching a candidate using measured experiment history.")
+                            llm_candidate = template_generator.generate_template_from_prompt(
+                                llm_prompt, region=region, use_ollama=True
+                            )
+                            if llm_candidate:
+                                llm_candidate = llm_candidate.strip().strip("`").strip()
+                                validator = getattr(template_generator, "template_validator", None)
+                                compile_result = (
+                                    validator.compile_template(llm_candidate, optimize=False)
+                                    if validator and getattr(validator, "use_ast", False)
+                                    else None
+                                )
+                                locally_valid = bool(compile_result and compile_result.success)
+                                has_placeholders = bool(
+                                    __import__("re").search(
+                                        r"\\b(?:OPERATOR|DATA_FIELD)\\d+\\b",
+                                        llm_candidate,
+                                        __import__("re").IGNORECASE
+                                    )
+                                )
+                                if locally_valid and not has_placeholders:
+                                    if compile_result.final_expression:
+                                        llm_candidate = compile_result.final_expression
+                                    generated_templates.append({
+                                        "template": llm_candidate,
+                                        "region": region
+                                    })
+                                    completed_count["successful"] += 1
+                                    try:
+                                        from generation_two.core import template_similarity
+                                        checker = template_similarity.TemplateSimilarityChecker()
+                                        template_generator_backtest_storage = getattr(
+                                            self.workflow.generator, "backtest_storage", None
+                                        )
+                                        if template_generator_backtest_storage:
+                                            template_generator_backtest_storage.store_template(
+                                                template=llm_candidate,
+                                                region=region,
+                                                operators_used=list(checker.extract_operators(llm_candidate)),
+                                                fields_used=list(checker.extract_fields(llm_candidate))
+                                            )
+                                    except Exception as store_error:
+                                        logger.warning("Could not store LLM candidate: %s", store_error)
+                                    self._log_to_gen_slot(
+                                        primary_slot_id,
+                                        f"LLM research candidate compiled locally: {llm_candidate[:70]}..."
+                                    )
+                                    self._update_gen_slot_display(
+                                        primary_slot_id, "GENERATED", llm_candidate[:55],
+                                        "LLM research candidate, awaiting BRAIN simulation",
+                                        ["LLM hypothesis generation", "Local FASTEXPR compilation passed",
+                                         "BRAIN simulation still required"],
+                                        100.0, ""
+                                    )
+                                    self.gen_slot_manager.release_slots(
+                                        slot_ids, success=True,
+                                        result={"template": llm_candidate, "source": "llm_research"}
+                                    )
+                                    return
+                                logger.warning(
+                                    "[Step 4] LLM candidate failed strict local compilation; "
+                                    "falling back to algorithmic generation."
+                                )
+                                self._log_to_gen_slot(
+                                    primary_slot_id,
+                                    "LLM candidate did not pass local compilation; using validated fallback path."
+                                )
+                        except Exception as research_error:
+                            logger.warning(
+                                "[Step 4] LLM research generation failed; using algorithmic fallback: %s",
+                                research_error
+                            )
+
                     # Update progress before algorithmic template generation.
                     # Step 4 currently does not call Ollama; it creates placeholders locally.
                     if self.gen_slot_manager:
