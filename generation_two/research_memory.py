@@ -235,7 +235,8 @@ class ResearchMemory:
             with self._connect() as conn:
                 rows = conn.execute("""
                     SELECT alpha_id, template, sharpe, fitness, turnover,
-                           returns, drawdown, correlations, timestamp
+                           returns, drawdown, correlations, power_pool_corr,
+                           prod_corr, checks_json, timestamp
                     FROM research_experiments
                     WHERE region = ? AND success = 1
                     ORDER BY fitness DESC, sharpe DESC, timestamp DESC
@@ -250,7 +251,8 @@ class ResearchMemory:
                     "sharpe": row[2] or 0, "fitness": row[3] or 0,
                     "turnover": row[4] or 0, "returns": row[5] or 0,
                     "drawdown": row[6] or 0, "correlations": row[7] or "",
-                    "timestamp": row[8] or 0,
+                    "power_pool_corr": row[8] or "", "prod_corr": row[9] or "",
+                    "checks": row[10] or "", "timestamp": row[11] or 0,
                 }
                 current = self._operator_set(item["template"])
                 # Avoid filling the context with near-identical operator families.
@@ -310,6 +312,15 @@ class ResearchMemory:
                     f"Turnover={item['turnover']:.3f}, Returns={item['returns']:.3f}, "
                     f"Drawdown={item['drawdown']:.3f}"
                 )
+                if item.get("power_pool_corr") or item.get("prod_corr"):
+                    sections.append(
+                        "   BRAIN correlations: powerPool="
+                        + str(item.get("power_pool_corr", ""))[:350]
+                        + "; production="
+                        + str(item.get("prod_corr", ""))[:350]
+                    )
+                if item.get("checks"):
+                    sections.append("   BRAIN checks: " + str(item["checks"])[:500])
         if failures:
             sections.append("RECENT FAILED EXPERIMENTS (avoid repeating blindly):")
             for item in failures:
