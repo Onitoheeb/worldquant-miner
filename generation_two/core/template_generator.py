@@ -779,7 +779,7 @@ Generate a valid FASTEXPR expression that uses operator(data_field, parameters) 
                     # Never resolve unresolved placeholders with a separate random list.
                     # The selection used to create the expression must be the selection
                     # used to resolve it; otherwise the expression's construction is invalid.
-                    if template and re.search(r'\\b(?:OPERATOR|DATA_FIELD)\\d+\\b', template, re.IGNORECASE):
+                    if template and re.search(r'\b(?:OPERATOR|DATA_FIELD)\d+\b', template, re.IGNORECASE):
                         logger.warning(
                             "Generated template still contains unresolved placeholders; "
                             "rejecting it instead of substituting independently selected operators/fields: %s",
