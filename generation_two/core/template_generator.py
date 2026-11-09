@@ -189,7 +189,7 @@ class TemplateGenerator:
                 data_fields=[],  # Will be updated per region
                 ollama_manager=self.ollama_manager,
                 db_path=self.db_path,
-                use_ast=False  # Disable AST by default, use prompt engineering and database knowledge only
+                use_ast=True  # Require AST parsing before a template can be accepted
             )
             logger.info("✅ Template validator initialized (AST disabled, using prompt engineering and database knowledge)")
                 
@@ -847,7 +847,10 @@ Generate a valid FASTEXPR expression that uses operator(data_field, parameters) 
                                     logger.info(f"✅ Template {i+1} fixed and compiled")
                                     self.template_validator.learn_from_success(template)
                                 else:
-                                    logger.warning(f"⚠️ Template {i+1} still invalid after fixes, but including it")
+                                    logger.error(
+                                        f"❌ Template {i+1} remains invalid after correction; rejecting before storage/simulation"
+                                    )
+                                    continue
                             else:
                                 logger.warning(f"⚠️ Could not fix template {i+1}, skipping")
                                 continue
