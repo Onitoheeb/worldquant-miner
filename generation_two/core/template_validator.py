@@ -916,14 +916,14 @@ FIXED EXPRESSION:"""
                 # Do not repeat the same database write or continue with an operator
                 # BRAIN has explicitly rejected.
                 operator_match = re.search(
-                    r'Operator\\s+(\\w+)\\s+(?:does not support|expects only)\\s+event inputs',
+                    r'Operator\s+(\w+)\s+(?:does not support|expects only)\s+event inputs',
                     error_message,
                     re.IGNORECASE,
                 )
                 if operator_match:
                     rejected_operator = operator_match.group(1)
                     still_present = re.search(
-                        r'\\b' + re.escape(rejected_operator) + r'\\s*\\(',
+                        r'\b' + re.escape(rejected_operator) + r'\s*\(',
                         current_template,
                         re.IGNORECASE,
                     )
