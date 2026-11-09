@@ -875,7 +875,33 @@ FIXED EXPRESSION:"""
                 all_fixes.extend([f"DB: {f}" for f in db_fixes])
                 current_template = db_fixed
                 logger.info(f"🔧 Applied database knowledge fixes: {db_fixes}")
-            
+
+            # A remote BRAIN inaccessible/unknown-operator error is authoritative.
+            # If deterministic catalogue knowledge did not replace that operator,
+            # do not ask the LLM to rewrite the expression around the same invalid
+            # operator. That caused repeated 40-50 second calls with no progress.
+            if ("unknown operator" in error_message.lower() or
+                    ("inaccessible" in error_message.lower() and "operator" in error_message.lower())):
+                rejected_match = re.search(
+                    r'(?:unknown|inaccessible).*?operator\\s+"?(\\w+)',
+                    error_message,
+                    re.IGNORECASE,
+                )
+                if rejected_match:
+                    rejected_operator = rejected_match.group(1)
+                    operator_still_present = re.search(
+                        r'\\b' + re.escape(rejected_operator) + r'\\s*\\(',
+                        current_template,
+                        re.IGNORECASE,
+                    )
+                    if operator_still_present:
+                        logger.error(
+                            "Stopping repair before Ollama: BRAIN rejected operator %s "
+                            "and no verified deterministic replacement is available",
+                            rejected_operator,
+                        )
+                        return None, all_fixes
+
             # Step 1: Fix "Invalid number of inputs" errors (CRITICAL - retry until success)
             if is_input_count_error:
                 logger.info("🔧 Applying fix for invalid number of inputs error...")
