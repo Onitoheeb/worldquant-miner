@@ -82,74 +82,22 @@ class TemplateValidator:
     
     def _cleanup_template(self, template: str) -> str:
         """
-        Clean up common syntax errors in generated templates
-        
-        Fixes:
-        - Removes region prefixes (USA., EUR., CHN., etc.)
-        - Removes leading + signs before fields
-        - Fixes invalid * operator usage
-        - Removes invalid commas
-        - Fixes other common syntax issues
+        Apply only safe outer formatting cleanup.
+
+        Do not rewrite operators, commas, arithmetic, or parentheses with regex:
+        those transformations can silently change the meaning of a FASTEXPR.
+        Structural correctness is checked by FASTEXPRParser.
         """
-        import re
-        
-        cleaned = template.strip()
-        
-        # Remove region prefixes (USA., EUR., CHN., ASI., GLB., IND.)
-        cleaned = re.sub(r'\b(USA|EUR|CHN|ASI|GLB|IND)\.([a-z][a-z0-9_]+)\b', r'\2', cleaned, flags=re.IGNORECASE)
-        
-        # Remove leading + signs before fields or operators
-        cleaned = re.sub(r'\(\s*\+([a-z][a-z0-9_]+)', r'(\1', cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r'\(\s*\+([a-z_]+)\s*\(', r'(\1(', cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r'\s*\+\s*([a-z][a-z0-9_]+)\s*\)', r' \1)', cleaned, flags=re.IGNORECASE)
-        
-        # Fix invalid * operator at start (*(field -> multiply(field or just field)
-        cleaned = re.sub(r'\(\s*\*\s*\(([a-z][a-z0-9_]+)', r'(\1', cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r'\(\s*\*\s*([a-z][a-z0-9_]+)', r'(\1', cleaned, flags=re.IGNORECASE)
-        
-        # FASTEXPR DOES use commas for operator parameters!
-        # Keep commas between field and parameter: operator(field, param) is CORRECT
-        # Only remove commas in clearly wrong contexts (like between closing parens without operator)
-        # Pattern: field, number or field, field - these are CORRECT (keep them)
-        # Pattern: ), number or ), field - these might be wrong if not in operator context
-        # For now, keep all commas - they're needed for operator parameters
-        
-        # Fix missing commas: ) number -> ), number (common error from LLM)
-        # Pattern: ) followed by number or identifier -> ), number/identifier
-        import re
-        cleaned = re.sub(r'\)\s+(\d+)', r'), \1', cleaned)  # ) 20 -> ), 20
-        cleaned = re.sub(r'\)\s+([a-z][a-z0-9_]+)', r'), \1', cleaned)  # ) field -> ), field
-        
-        # Fix double operators (rankrank -> rank, ts_meants_mean -> ts_mean)
-        cleaned = re.sub(r'([a-z_]+)\1', r'\1', cleaned, flags=re.IGNORECASE)
-        
-        # Fix invalid operator combinations (add(field1 + field2) -> field1 + field2)
-        cleaned = re.sub(r'\b(add|multiply|subtract|divide)\s*\(([^)]+\+[^)]+)\)', r'(\2)', cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r'\b(add|multiply|subtract|divide)\s*\(([^)]+\*[^)]+)\)', r'(\2)', cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r'\b(add|multiply|subtract|divide)\s*\(([^)]+-[^)]+)\)', r'(\2)', cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r'\b(add|multiply|subtract|divide)\s*\(([^)]+/[^)]+)\)', r'(\2)', cleaned, flags=re.IGNORECASE)
-        
-        # Remove extra spaces
-        cleaned = re.sub(r'\s+', ' ', cleaned)
-        cleaned = cleaned.strip()
-        
-        # Fix unbalanced parentheses (remove trailing extra closing parens)
-        # This can happen after deduplication of nested operators
-        open_count = cleaned.count('(')
-        close_count = cleaned.count(')')
-        if close_count > open_count:
-            # Remove trailing extra closing parentheses
-            extra_closes = close_count - open_count
-            # Remove from the end, but be careful not to break valid expressions
-            # Only remove if they're clearly trailing
-            while extra_closes > 0 and cleaned.endswith(')'):
-                cleaned = cleaned[:-1]
-                extra_closes -= 1
-            if extra_closes > 0:
-                logger.debug(f"⚠️ Template still has {extra_closes} extra closing parentheses after cleanup")
-        
+        cleaned = (template or "").strip()
+        if cleaned.startswith("```"):
+            lines = cleaned.splitlines()
+            if lines:
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            cleaned = "\n".join(lines).strip()
         return cleaned
-    
+
     def validate_template(self, template: str, region: str = None, delay: int = None) -> Tuple[bool, str, Optional[str]]:
         """
         Validate template
@@ -225,10 +173,8 @@ class TemplateValidator:
                     fixes_applied.append("Prompt engineering fix")
                     return fixed_prompt, fixes_applied
                 else:
-                    # Try combining both fixes
-                    combined = self._combine_fixes(fixed_ast, fixed_prompt)
-                    fixes_applied.append("Combined AST + prompt fix")
-                    return combined, fixes_applied
+                    logger.warning("AI correction did not pass FASTEXPR validation; rejecting the proposed fix")
+                    return fixed_ast, fixes_applied
         
         # Return AST fix even if not perfect
         return fixed_ast, fixes_applied
@@ -492,8 +438,10 @@ Common FASTEXPR errors:
 DIAGNOSIS (be specific):"""
 
         try:
-            diagnosis = self.ollama_manager.generate(diagnosis_prompt, max_tokens=200)
-            logger.debug(f"AI Diagnosis: {diagnosis[:100] if diagnosis else 'None'}")
+            # Avoid a separate diagnostic LLM round-trip. Include the error and
+            # broken expression in the repair prompt below so one request does both.
+            diagnosis = None
+            logger.debug("Using single-pass FASTEXPR repair (diagnosis folded into repair prompt)")
         except Exception as e:
             logger.debug(f"Diagnosis step failed: {e}")
             diagnosis = None
@@ -594,7 +542,7 @@ FIXED EXPRESSION:"""
         fixed = None  # Initialize to avoid "cannot access local variable" error
         try:
             # Use higher max_tokens for complex fixes
-            response = self.ollama_manager.generate(fix_prompt, max_tokens=800)
+            response = self.ollama_manager.generate(fix_prompt, temperature=0.1, max_tokens=300)
             if response:
                 # Extract expression from response
                 fixed = self._extract_expression_from_response(response)
