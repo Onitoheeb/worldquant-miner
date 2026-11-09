@@ -706,12 +706,12 @@ class OllamaManager:
         self._last_generator = generator
 
         required_operators = sorted(
-            {f"OPERATOR{n}" for n in re.findall(r"OPERATOR(\\d+)", placeholder_expression, re.IGNORECASE)},
-            key=lambda value: int(re.search(r"\\d+", value).group())
+            {f"OPERATOR{n}" for n in re.findall(r"OPERATOR(\d+)", placeholder_expression, re.IGNORECASE)},
+            key=lambda value: int(re.search(r"\d+", value).group())
         )
         required_fields = sorted(
-            {f"DATA_FIELD{n}" for n in re.findall(r"DATA_FIELD(\\d+)", placeholder_expression, re.IGNORECASE)},
-            key=lambda value: int(re.search(r"\\d+", value).group())
+            {f"DATA_FIELD{n}" for n in re.findall(r"DATA_FIELD(\d+)", placeholder_expression, re.IGNORECASE)},
+            key=lambda value: int(re.search(r"\d+", value).group())
         )
 
         operator_mapping = getattr(generator, "_last_operator_mapping", {})
