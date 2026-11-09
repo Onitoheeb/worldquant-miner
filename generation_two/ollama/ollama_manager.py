@@ -1179,37 +1179,45 @@ CRITICAL FASTEXPR SYNTAX RULES:
             for pattern in successful_patterns[:3]:  # Show top 3 patterns
                 user_prompt += f"\n  - {pattern}"
         
-        # Add concrete syntax examples using placeholders (V3 approach) - WITH COMMAS for parameters
-        user_prompt += "\n\nDIVERSE SYNTAX EXAMPLES (use OPERATOR1, OPERATOR2, DATA_FIELD1, DATA_FIELD2 placeholders - COMMAS for parameters!):"
-        if use_placeholder_fields:
-            # Use operator and field placeholders in examples - COMMAS for operator parameters
-            user_prompt += "\n  - OPERATOR1(DATA_FIELD1, 4)  # Operator with parameter - COMMA between field and parameter"
-            user_prompt += "\n  - OPERATOR1(DATA_FIELD1)  # Operator without parameter (no comma needed)"
-            user_prompt += "\n  - OPERATOR1(OPERATOR2(DATA_FIELD1), 5)  # Nested operators - COMMA between arguments"
-            user_prompt += "\n  - DATA_FIELD1 + DATA_FIELD2  # Arithmetic addition - NO comma (just space around +)"
-            user_prompt += "\n  - OPERATOR1(DATA_FIELD1, 2)  # Power-like operator - COMMA between field and parameter"
-            user_prompt += "\n  - OPERATOR1(DATA_FIELD1 - OPERATOR2(DATA_FIELD1, 20))  # Absolute deviation - COMMA in nested operator"
-            user_prompt += "\n  - OPERATOR1(DATA_FIELD1 * DATA_FIELD2, 10)  # Rank of product - COMMA before parameter"
-            user_prompt += "\n  - OPERATOR1(DATA_FIELD1 / DATA_FIELD2, 3)  # Winsorized ratio - COMMA before parameter"
-            user_prompt += "\n  - OPERATOR1(OPERATOR2(OPERATOR3(DATA_FIELD1)), DATA_FIELD2)  # Complex nested - COMMA between arguments"
-            user_prompt += "\n\nCRITICAL: Use OPERATOR1, OPERATOR2, etc. for operators and DATA_FIELD1, DATA_FIELD2, etc. for fields!"
-            user_prompt += "\nExample format: OPERATOR1(OPERATOR2(DATA_FIELD1), 5)"
-        elif available_fields and len(available_fields) > 0:
-            # Fallback: Use actual field IDs (old approach)
-            example_fields = [f.get('id', '') for f in available_fields[:6] if f.get('id')]
-            if example_fields:
-                user_prompt += f"\n  - winsorize({example_fields[0]}, 4)  # Winsorize to 4 std"
+        # Provide examples that match the configured placeholder mode.
+        if not use_placeholder_operators and not use_placeholder_fields:
+            user_prompt += "\n\nDIVERSE SYNTAX EXAMPLES (use exact listed operator and field names):"
+            example_operators = [
+                op.get("name", "") for op in (available_operators or [])
+                if op.get("name")
+            ]
+            example_fields = [
+                field.get("id", "") for field in (available_fields or [])
+                if field.get("id")
+            ]
+            if example_operators and example_fields:
+                user_prompt += f"\n  - {example_operators[0]}({example_fields[0]})"
+                if len(example_operators) > 1 and len(example_fields) > 1:
+                    user_prompt += f"\n  - {example_operators[1]}({example_fields[1]}, 20)"
                 if len(example_fields) > 1:
-                    user_prompt += f"\n  - zscore({example_fields[1]})  # Z-score normalization"
-                if len(example_fields) > 2:
-                    user_prompt += f"\n  - rank({example_fields[2]})  # Cross-sectional rank"
-                if len(example_fields) > 3:
-                    user_prompt += f"\n  - {example_fields[3]} + {example_fields[4]}  # Arithmetic addition"
+                    user_prompt += f"\n  - {example_fields[0]} / {example_fields[1]}"
+            user_prompt += "\nDo not use OPERATOR or DATA_FIELD placeholders."
         else:
-            # Fallback examples
-            user_prompt += "\n  - winsorize(field_id, 4)  # Winsorize to 4 std"
-            user_prompt += "\n  - zscore(field_id)  # Z-score normalization"
-            user_prompt += "\n  - rank(field_id)  # Cross-sectional rank"
+            # Placeholder-mode examples remain available for the legacy pipeline.
+            user_prompt += "\n\nDIVERSE SYNTAX EXAMPLES (use placeholders only where instructed - COMMAS for parameters!):"
+            if use_placeholder_fields:
+                user_prompt += "\n  - OPERATOR1(DATA_FIELD1, 4)  # Operator with parameter"
+                user_prompt += "\n  - OPERATOR1(DATA_FIELD1)  # Operator without parameter"
+                user_prompt += "\n  - OPERATOR1(OPERATOR2(DATA_FIELD1), 5)  # Nested operators"
+                user_prompt += "\n  - DATA_FIELD1 + DATA_FIELD2  # Arithmetic addition"
+                user_prompt += "\nUse the exact placeholder format requested above."
+            elif available_fields:
+                example_fields = [f.get('id', '') for f in available_fields[:6] if f.get('id')]
+                if example_fields:
+                    user_prompt += f"\n  - winsorize({example_fields[0]}, 4)"
+                    if len(example_fields) > 1:
+                        user_prompt += f"\n  - zscore({example_fields[1]})"
+                    if len(example_fields) > 2:
+                        user_prompt += f"\n  - rank({example_fields[2]})"
+            else:
+                user_prompt += "\n  - winsorize(field_id, 4)"
+                user_prompt += "\n  - zscore(field_id)"
+                user_prompt += "\n  - rank(field_id)"
         
         if dataset_categories:
             user_prompt += f"\n\nRequired dataset categories: {', '.join(dataset_categories)}"
