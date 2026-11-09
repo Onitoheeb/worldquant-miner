@@ -530,8 +530,16 @@ Generate a valid FASTEXPR expression that uses operator(data_field, parameters) 
                         # Use exclusive selection with usage-based diversity
                         with operator_pool_lock:
                             # First, filter out operators that are currently in use OR have been used in this batch
+                            # vec_* operators require VECTOR-typed inputs. This
+                            # placeholder generator does not build type-directed AST
+                            # leaves, so never offer vector operators for arbitrary fields.
+                            eligible_operator_indices = [
+                                i for i, operator in enumerate(available_operators)
+                                if operator.get("name")
+                                and not str(operator.get("name", "")).lower().startswith("vec_")
+                            ]
                             available_indices = [
-                                i for i in range(len(available_operators)) 
+                                i for i in eligible_operator_indices
                                 if i not in used_operator_indices
                             ]
                             
@@ -556,11 +564,12 @@ Generate a valid FASTEXPR expression that uses operator(data_field, parameters) 
                                 logger.debug(f"[Step 4] Slot {primary_slot_id+1}: Not enough available operators, resetting usage counts...")
                                 used_operator_indices.clear()
                                 operator_usage_count.clear()
-                                candidate_indices = list(range(len(available_operators)))
+                                candidate_indices = eligible_operator_indices[:]
                                 if len(candidate_indices) < 2:
-                                    # If still not enough, we have to use batch-used operators (shouldn't happen with 79 operators)
-                                    logger.warning(f"[Step 4] Slot {primary_slot_id+1}: Very few operators available, allowing batch-used operators")
-                                    candidate_indices = list(range(len(available_operators)))
+                                    logger.error(
+                                        "[Step 4] Fewer than two non-vector operators are available; "
+                                        "skipping this candidate rather than generating a VECTOR/MATRIX mismatch."
+                                    )
                             
                             # Sort by usage count (ascending) to prefer less-used operators
                             candidate_indices.sort(key=lambda i: operator_usage_count.get(i, 0))
