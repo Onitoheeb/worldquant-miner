@@ -292,11 +292,18 @@ class FASTEXPRParser:
             
             left_node = self._parse_expression(template, start, start + len(left_expr)) if left_expr else None
             right_node = self._parse_expression(template, start + lowest_pos + len(lowest_op), end) if right_expr else None
-            
+
+            # Permit unary minus/not, but reject missing operands in binary expressions.
+            if not right_node:
+                raise ValueError(f"Missing right operand for '{lowest_op}'")
+            if not left_node and lowest_op not in ('-', '!'):
+                raise ValueError(f"Missing left operand for '{lowest_op}'")
+
+            children = [node for node in (left_node, right_node) if node]
             return ASTNode(
                 node_type='arithmetic',
                 value=lowest_op,
-                children=[n for n in [left_node, right_node] if n],
+                children=children,
                 position=(start, end)
             )
         
@@ -352,8 +359,9 @@ class FASTEXPRParser:
                 arg_str = args_str[current_start:i].strip()
                 if arg_str:
                     arg_node = self._parse_expression(args_str, current_start, i)
-                    if arg_node:
-                        args.append(arg_node)
+                    if not arg_node:
+                        raise ValueError(f"Invalid FASTEXPR function argument: {arg_str!r}")
+                    args.append(arg_node)
                 current_start = i + 1
         
         # Last argument
@@ -361,8 +369,9 @@ class FASTEXPRParser:
             arg_str = args_str[current_start:].strip()
             if arg_str:
                 arg_node = self._parse_expression(args_str, current_start, len(args_str))
-                if arg_node:
-                    args.append(arg_node)
+                if not arg_node:
+                    raise ValueError(f"Invalid FASTEXPR function argument: {arg_str!r}")
+                args.append(arg_node)
         
         return args
     
