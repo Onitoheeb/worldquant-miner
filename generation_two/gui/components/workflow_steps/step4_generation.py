@@ -379,7 +379,7 @@ Generate a valid FASTEXPR expression that uses operator(data_field, parameters) 
                                 f"Develop one testable quantitative alpha hypothesis for {region}."
                             )
                             llm_prompt = (
-                                f"{research_prompt}\\n\\n"
+                                f"{research_prompt}\n\n"
                                 "Generate exactly ONE FASTEXPR expression using only the "
                                 "operator and data-field catalogues supplied to you. "
                                 "Do not return explanations, markdown, placeholders, or "
@@ -404,7 +404,7 @@ Generate a valid FASTEXPR expression that uses operator(data_field, parameters) 
                                 locally_valid = bool(compile_result and compile_result.success)
                                 has_placeholders = bool(
                                     __import__("re").search(
-                                        r"\\b(?:OPERATOR|DATA_FIELD)\\d+\\b",
+                                        r"\b(?:OPERATOR|DATA_FIELD)\d+\b",
                                         llm_candidate,
                                         __import__("re").IGNORECASE
                                     )
