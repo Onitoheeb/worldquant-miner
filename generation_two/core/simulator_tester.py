@@ -73,14 +73,14 @@ class SimulationResult:
 
 
 class SimulatorTester:
-    # Shared across instances: BRAIN enforces the concurrency limit per account.
-    _submission_semaphore = threading.BoundedSemaphore(value=1)
+    """
+    Handles simulation submission and monitoring.
 
+    The submission semaphore is shared across instances because BRAIN applies
+    its concurrent-simulation limit to the account, not to an individual worker.
     """
-    Handles simulation submission and monitoring
-    
-    Separated from template generation for modularity.
-    """
+
+    _submission_semaphore = threading.BoundedSemaphore(value=1)
     
     def __init__(self, session: requests.Session, region_configs: Dict, template_generator=None):
         """
