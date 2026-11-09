@@ -94,7 +94,7 @@ class FASTEXPRParser:
         Generation Two submits REGULAR alphas by default.
         """
         self.alpha_type = (alpha_type or "REGULAR").upper()
-        self.operators: Dict[str, Dict] = {};
+        self.operators: Dict[str, Dict] = {}
         self.operator_scopes: Dict[str, Set[str]] = {}  # operator_name -> {REGULAR, MATRIX, VECTOR}
         self.vec_operators: Set[str] = set()  # Operators that start with vec_
         self.data_fields: Dict[str, Dict] = {}
