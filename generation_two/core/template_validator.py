@@ -263,12 +263,12 @@ class TemplateValidator:
         fixes_applied = []
         fixed_template = template
         
-        # Check for event input errors
+        # Event-input compatibility is recorded by the simulation failure path.
+        # Do not learn again while attempting a repair; repair must not turn an
+        # unverified operator guess into persistent compiler knowledge.
         if 'does not support event inputs' in error_message.lower() or 'expects only event inputs' in error_message.lower():
             fixed_template, event_fixes = self._fix_event_input_error(fixed_template, error_message, region)
             fixes_applied.extend(event_fixes)
-            # Learn and save the incompatible operator
-            self._learn_event_input_compatibility(template, error_message)
         
         # Fix missing lookback parameter: "Required attribute 'lookback' must have a value"
         if "required attribute" in error_message.lower() and "lookback" in error_message.lower():
@@ -1192,25 +1192,10 @@ FIXED EXPRESSION:"""
             # Map of operators that don't support event inputs to replacements
             # Event input compatible operators: vec_*, ts_* (some), event-specific operators
             # Non-event operators: arithmetic (add, subtract, multiply, divide), cross-sectional (rank, winsorize, zscore)
-            event_input_replacements = {
-                'multiply': 'ts_multiply',  # Time series version
-                'add': 'ts_add',
-                'subtract': 'ts_subtract',
-                'divide': 'ts_divide',
-                'power': 'ts_power',
-                'signed_power': 'ts_signed_power',
-                'abs': 'ts_abs',
-                'log': 'ts_log',
-                'sqrt': 'ts_sqrt',
-                'min': 'ts_min',
-                'max': 'ts_max',
-                'rank': 'ts_rank',  # Time series rank instead of cross-sectional
-                'delta': 'ts_delta',
-                'correlation': 'ts_correlation',
-                'winsorize': 'ts_winsorize',  # Try ts_ version if exists
-                'zscore': 'ts_zscore',  # Try ts_ version
-                'reverse': 'ts_reverse',  # Time series reverse
-            }
+            # Do not infer compatibility from naming similarity (for example,
+            # add -> ts_add). A replacement is usable only after its signature
+            # and event-input support have been verified against BRAIN.
+            event_input_replacements = {}
             
             # Try to find replacement
             replacement = event_input_replacements.get(problematic_operator.lower())
@@ -1297,24 +1282,9 @@ FIXED EXPRESSION:"""
                 replacement = None
                 if hasattr(self, '_fix_event_input_error'):
                     # Check replacement mapping
-                    event_input_replacements = {
-                        'multiply': 'ts_multiply',
-                        'add': 'ts_add',
-                        'subtract': 'ts_subtract',
-                        'divide': 'ts_divide',
-                        'rank': 'ts_rank',
-                        'power': 'ts_power',
-                        'signed_power': 'ts_signed_power',
-                        'abs': 'ts_abs',
-                        'log': 'ts_log',
-                        'sqrt': 'ts_sqrt',
-                        'min': 'ts_min',
-                        'max': 'ts_max',
-                        'delta': 'ts_delta',
-                        'correlation': 'ts_correlation',
-                        'reverse': 'ts_reverse',
-                        'negative_colocation': None,  # No direct replacement
-                    }
+                    # No replacement is marked verified until BRAIN confirms
+                    # that it accepts the candidate with the relevant event field.
+                    event_input_replacements = {}
                     replacement = event_input_replacements.get(operator_name)
                 
                 # Extract AST pattern from template (only if AST is enabled)
