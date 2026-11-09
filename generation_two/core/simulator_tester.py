@@ -111,7 +111,32 @@ class SimulatorTester:
             Progress URL if successful, None otherwise
         """
         try:
+            import re
             from dataclasses import asdict
+
+            # Final safety barrier: never send unresolved algorithmic placeholders to BRAIN.
+            unresolved = re.findall(r'\b(?:OPERATOR|DATA_FIELD)\d+\b', template or '', re.IGNORECASE)
+            if unresolved:
+                logger.error(
+                    "Rejecting simulation submission because unresolved placeholders remain: %s",
+                    unresolved
+                )
+                return None
+
+            # Require compiler validation at the API boundary as well. This protects
+            # retries and any caller that bypasses the Step 5 GUI validation path.
+            validator = getattr(self.template_generator, 'template_validator', None)
+            if validator and getattr(validator, 'use_ast', False):
+                compile_result = validator.compile_template(template, optimize=False)
+                if not compile_result.success:
+                    errors = [getattr(error, 'message', str(error)) for error in (compile_result.errors or [])]
+                    logger.error(
+                        "Rejecting simulation submission because FASTEXPR compilation failed: %s",
+                        errors[:3]
+                    )
+                    return None
+                if compile_result.final_expression:
+                    template = compile_result.final_expression
             
             region_config = self.region_configs.get(region)
             if not region_config:
