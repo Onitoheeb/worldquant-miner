@@ -306,7 +306,7 @@ class BacktestStorage:
             # Mirror the exact observed simulation outcome into persistent research memory.
             # This is observation-only: it never infers operator compatibility or submits work.
             try:
-                from ..evolution.research_memory import ResearchMemory
+                from ..research_memory import ResearchMemory
                 ResearchMemory(self.db_path).record_result(result)
             except Exception as memory_error:
                 logger.warning("Could not update research memory: %s", memory_error)
