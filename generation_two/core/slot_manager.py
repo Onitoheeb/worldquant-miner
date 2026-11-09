@@ -59,12 +59,18 @@ class Slot:
     
     def update_progress(self, percent: float, message: str = "", api_status: str = ""):
         """Update progress information"""
-        # Ensure percent is a float (handle string inputs from API)
+        # Some legacy callers pass a status message in the percent position.
+        # Preserve it as text instead of logging a misleading invalid-percent warning.
         try:
             percent = float(percent)
         except (ValueError, TypeError):
-            logger.warning(f"Invalid percent value: {percent}, using 0.0")
-            percent = 0.0
+            if isinstance(percent, str) and percent.strip():
+                if not message:
+                    message = percent
+                percent = self.progress_percent
+            else:
+                logger.warning("Invalid progress value %r; retaining previous progress", percent)
+                percent = self.progress_percent
         self.progress_percent = max(0.0, min(100.0, percent))
         if message:
             self.progress_message = message
