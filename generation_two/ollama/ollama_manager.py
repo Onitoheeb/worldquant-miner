@@ -671,7 +671,8 @@ class OllamaManager:
         progress_callback: Optional[Callable[[str], None]] = None,
         generator: Optional[Any] = None,
         region: str = None,
-        backtest_storage: Optional[Any] = None
+        backtest_storage: Optional[Any] = None,
+        alpha_type: str = "REGULAR"
     ) -> Optional[Dict]:
         """
         Select valid operator/field indices locally.
@@ -683,7 +684,7 @@ class OllamaManager:
         from generation_two.core.algorithmic_template_generator import AlgorithmicTemplateGenerator
 
         if generator is None:
-            generator = AlgorithmicTemplateGenerator(available_operators, available_fields)
+            generator = AlgorithmicTemplateGenerator(available_operators, available_fields, alpha_type=alpha_type)
 
         recently_used_fields = []
         if region and backtest_storage and hasattr(backtest_storage, 'get_recently_used_fields'):
@@ -701,7 +702,8 @@ class OllamaManager:
             placeholder_expression,
             available_operators,
             available_fields,
-            recently_used_fields=recently_used_fields
+            recently_used_fields=recently_used_fields,
+            alpha_type=alpha_type
         )
         self._last_generator = generator
 
@@ -755,8 +757,9 @@ class OllamaManager:
         available_operators: List[Dict],
         available_fields: List[Dict],
         progress_callback: Optional[Callable[[str], None]] = None,
-        region: str = None,  # New: for querying recently used fields
-        backtest_storage: Optional[Any] = None  # New: for querying database
+        region: str = None,  # For querying recently used fields
+        backtest_storage: Optional[Any] = None,  # For querying database
+        alpha_type: str = "REGULAR"
     ) -> Optional[str]:
         """
         Replace placeholders in expression by asking Ollama to select indices
@@ -773,7 +776,7 @@ class OllamaManager:
         from generation_two.core.algorithmic_template_generator import AlgorithmicTemplateGenerator
         
         # Create generator to get prompt and mappings
-        generator = AlgorithmicTemplateGenerator(available_operators, available_fields)
+        generator = AlgorithmicTemplateGenerator(available_operators, available_fields, alpha_type=alpha_type)
         
         # Ask Ollama to select (this will set _last_operator_mapping and _last_field_mapping)
         selection = self.select_operators_and_fields_by_index(
@@ -783,7 +786,8 @@ class OllamaManager:
             progress_callback,
             generator=generator,
             region=region,
-            backtest_storage=backtest_storage
+            backtest_storage=backtest_storage,
+            alpha_type=alpha_type
         )
         
         if not selection:
