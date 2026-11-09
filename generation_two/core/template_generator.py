@@ -589,43 +589,34 @@ class TemplateGenerator:
         return fields
     
     def _store_field_types(self, fields: List[Dict], region: str, delay: int):
-        """Store field type information including event input detection"""
+        """Store field type information in one SQLite transaction."""
+        if not fields:
+            return
+
         try:
+            import json
+            import sqlite3
             from ..storage.backtest_storage import BacktestStorage
-            storage = BacktestStorage()
-            
+
+            storage = BacktestStorage(self.db_path)
+            rows = []
             for field in fields:
                 field_id = field.get('id', '')
                 if not field_id:
                     continue
-                
-                # Detect event input fields
+
                 field_type = field.get('type', 'REGULAR')
                 category = field.get('category', {})
                 category_name = category.get('name', '') if isinstance(category, dict) else str(category)
-                
-                # Check if field is event input
                 is_event_input = (
-                    field_type == 'EVENT' or
-                    'event' in str(field_type).lower() or
-                    'event' in category_name.lower() or
-                    'event' in str(field.get('name', '')).lower() or
-                    'event' in str(field.get('description', '')).lower()
+                    field_type == 'EVENT'
+                    or 'event' in str(field_type).lower()
+                    or 'event' in category_name.lower()
+                    or 'event' in str(field.get('name', '')).lower()
+                    or 'event' in str(field.get('description', '')).lower()
                 )
-                
-                # Store in database
-                import sqlite3
-                import json
-                from ..storage.backtest_storage import BacktestStorage
-                storage = BacktestStorage(self.db_path)
-                conn = sqlite3.connect(storage.db_path)
-                cursor = conn.cursor()
-                
-                cursor.execute('''
-                    INSERT OR REPLACE INTO field_types
-                    (field_id, region, delay, field_type, is_event_input, category, field_data, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                ''', (
+
+                rows.append((
                     field_id,
                     region,
                     delay,
@@ -634,14 +625,24 @@ class TemplateGenerator:
                     category_name,
                     json.dumps(field)
                 ))
-                
-                conn.commit()
-                conn.close()
-            
-            logger.debug(f"Stored {len(fields)} field types for {region} delay={delay}")
+
+            if not rows:
+                return
+
+            # A single connection, batch write, and busy timeout avoid repeatedly
+            # acquiring SQLite's write lock once per field across worker threads.
+            with sqlite3.connect(storage.db_path, timeout=30) as conn:
+                conn.execute("PRAGMA busy_timeout = 30000")
+                conn.executemany('''
+                    INSERT OR REPLACE INTO field_types
+                    (field_id, region, delay, field_type, is_event_input, category, field_data, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ''', rows)
+
+            logger.debug(f"Stored {len(rows)} field types for {region} delay={delay}")
         except Exception as e:
-            logger.debug(f"Failed to store field types: {e}")
-    
+            logger.warning(f"Failed to store field types for {region} delay={delay}: {e}")
+
     def generate_templates_for_region(
         self,
         region: str,
