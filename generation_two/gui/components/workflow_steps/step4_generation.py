@@ -304,6 +304,24 @@ class Step4Generation:
                 self.stop_generation_button.config(state=tk.DISABLED)
                 return
             
+            # Ollama availability is lazy by design. Check it once before worker
+            # threads start so the LLM research path is actually reachable.
+            ollama_manager = getattr(
+                self.workflow.generator.template_generator, "ollama_manager", None
+            )
+            if ollama_manager and not getattr(ollama_manager, "is_available", False):
+                try:
+                    available = ollama_manager._check_availability()
+                    logger.info(
+                        "[Step 4] Ollama research availability: %s",
+                        "available" if available else "unavailable; using algorithmic fallback"
+                    )
+                except Exception as availability_error:
+                    logger.warning(
+                        "[Step 4] Ollama health check failed; using algorithmic fallback: %s",
+                        availability_error
+                    )
+
             # Update validator with operators and fields
             if self.workflow.generator.template_generator.template_validator:
                 validator = self.workflow.generator.template_generator.template_validator
