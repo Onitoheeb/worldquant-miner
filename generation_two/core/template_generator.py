@@ -328,7 +328,10 @@ class TemplateGenerator:
                 avoid_duplicates_context=avoidance_context,
                 available_operators=available_operators,
                 available_fields=available_fields,
-                successful_patterns=successful_patterns
+                successful_patterns=successful_patterns,
+                use_placeholder_fields=False,
+                use_placeholder_operators=False,
+                use_algorithmic_generation=False
             )
             
             if template:
@@ -362,7 +365,10 @@ class TemplateGenerator:
                         avoid_duplicates_context=stronger_context,
                         available_operators=available_operators,
                         available_fields=available_fields,
-                        successful_patterns=successful_patterns
+                        successful_patterns=successful_patterns,
+                        use_placeholder_fields=False,
+                        use_placeholder_operators=False,
+                        use_algorithmic_generation=False
                     )
                 
                 if template and not self.duplicate_detector.is_duplicate(template):
