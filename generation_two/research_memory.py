@@ -78,6 +78,17 @@ class ResearchMemory:
                     created_at REAL NOT NULL
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS research_catalogue_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    region TEXT NOT NULL,
+                    delay INTEGER NOT NULL,
+                    alpha_type TEXT NOT NULL,
+                    operators_json TEXT NOT NULL,
+                    fields_json TEXT NOT NULL,
+                    captured_at REAL NOT NULL
+                )
+            """)
 
     @staticmethod
     def _value(result, key, default=None):
@@ -136,6 +147,42 @@ class ResearchMemory:
             return True
         except Exception:
             logger.exception("Could not record research experiment")
+            return False
+
+    def record_catalogue(
+        self, region: str, operators: List[Dict], fields: List[Dict],
+        delay: int = 1, alpha_type: str = "REGULAR"
+    ) -> bool:
+        """Persist the operator and field metadata available for a research run."""
+        if not region:
+            return False
+        try:
+            operator_keys = ("name", "definition", "description", "category", "scope")
+            field_keys = (
+                "id", "type", "field_type", "description", "category",
+                "dataset", "dataset_id", "coverage", "delay", "region"
+            )
+            operator_snapshot = [
+                {key: item.get(key) for key in operator_keys if item.get(key) is not None}
+                for item in (operators or [])[:1500]
+            ]
+            field_snapshot = [
+                {key: item.get(key) for key in field_keys if item.get(key) is not None}
+                for item in (fields or [])[:6000]
+            ]
+            with self._connect() as conn:
+                conn.execute("""
+                    INSERT INTO research_catalogue_snapshots
+                    (region, delay, alpha_type, operators_json, fields_json, captured_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (
+                    region, int(delay), (alpha_type or "REGULAR").upper(),
+                    json.dumps(operator_snapshot, default=str),
+                    json.dumps(field_snapshot, default=str), time.time()
+                ))
+            return True
+        except Exception:
+            logger.exception("Could not persist BRAIN research catalogue")
             return False
 
     def record_hypothesis(
