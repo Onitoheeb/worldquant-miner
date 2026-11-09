@@ -348,6 +348,20 @@ class Step4Generation:
             if self.workflow.generator.template_generator.template_validator and self.workflow.generator.template_generator.template_validator.corrector:
                 successful_patterns = self.workflow.generator.template_generator.template_validator.corrector.get_successful_patterns(limit=5)
             
+            # Persist the exact catalogue available to this research run so later
+            # experiments can be interpreted against the right field/operator metadata.
+            research_memory = getattr(
+                self.workflow.generator.template_generator, "research_memory", None
+            )
+            if research_memory:
+                research_memory.record_catalogue(
+                    region=region,
+                    operators=available_operators or [],
+                    fields=data_fields,
+                    delay=1,
+                    alpha_type="REGULAR"
+                )
+
             # Queue for templates to generate
             template_queue = list(range(count))
             generated_templates = []
