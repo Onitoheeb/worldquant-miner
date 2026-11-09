@@ -570,6 +570,16 @@ Generate a valid FASTEXPR expression that uses operator(data_field, parameters) 
                                         "[Step 4] Fewer than two non-vector operators are available; "
                                         "skipping this candidate rather than generating a VECTOR/MATRIX mismatch."
                                     )
+                                    completed_count['failed'] += 1
+                                    self.gen_slot_manager.release_slots(
+                                        slot_ids, success=False,
+                                        error="Insufficient compatible non-vector operators"
+                                    )
+                                    self._update_gen_slot_display(
+                                        primary_slot_id, "FAILED", "Insufficient compatible operators",
+                                        "Candidate skipped", ["No safe operator set available"], 100.0, ""
+                                    )
+                                    return
                             
                             # Sort by usage count (ascending) to prefer less-used operators
                             candidate_indices.sort(key=lambda i: operator_usage_count.get(i, 0))
