@@ -378,6 +378,26 @@ class FASTEXPRParser:
         
         return args
     
+    def _is_explicit_grouping_field(self, field_name: str) -> bool:
+        """Return True only when field metadata explicitly identifies a grouping field.
+
+        BRAIN's densify operator requires a grouping field, not an ordinary
+        scalar/matrix/vector data field. Never infer this from the field name.
+        """
+        info = self.data_fields.get(field_name, {}) or {}
+        field_type = str(info.get("type", "")).strip().upper()
+        if field_type in {"GROUP", "GROUPING"}:
+            return True
+        if info.get("is_group") is True or info.get("is_grouping") is True:
+            return True
+        for key in ("category", "subcategory", "field_category", "description"):
+            value = str(info.get(key, "")).strip().lower()
+            if value in {"group", "grouping", "grouping field"}:
+                return True
+            if key == "description" and "grouping field" in value:
+                return True
+        return False
+
     def _validate_ast(self, ast: ASTNode, template: str) -> List[SyntaxError]:
         """Validate AST for operator-field compatibility"""
         errors = []
@@ -422,6 +442,38 @@ class FASTEXPRParser:
                         operator_name=operator_name
                     ))
                     return errors
+
+                # densify has a stricter semantic input contract than ordinary
+                # REGULAR-scope operators: its input must be a grouping field.
+                # The public operator catalogue describes densify(x) as converting
+                # a grouping field; reject unknown/scalar fields instead of
+                # allowing BRAIN to discover the mismatch after submission.
+                if operator_name == "densify":
+                    if len(ast.children) != 1 or ast.children[0].node_type != "field":
+                        errors.append(SyntaxError(
+                            'type_mismatch',
+                            'densify requires one explicit grouping-field input; nested expressions are not accepted',
+                            ast.position,
+                            template,
+                            operator_name=operator_name,
+                            expected_type='GROUP'
+                        ))
+                        return errors
+                    group_field = ast.children[0].value
+                    if not self._is_explicit_grouping_field(group_field):
+                        field_info = self.data_fields.get(group_field, {}) or {}
+                        actual = field_info.get("type") or field_info.get("category") or "unclassified field"
+                        errors.append(SyntaxError(
+                            'type_mismatch',
+                            f'densify requires a grouping field, but {group_field} is classified as {actual}',
+                            ast.children[0].position,
+                            template,
+                            operator_name=operator_name,
+                            field_name=group_field,
+                            expected_type='GROUP',
+                            actual_type=str(actual)
+                        ))
+                        return errors
 
                 # Validate arguments (fields)
                 for child in ast.children:
