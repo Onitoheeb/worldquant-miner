@@ -540,6 +540,7 @@ class FASTEXPRParser:
                         field_name = child.value
                         field_type = self.field_types.get(field_name)
 
+                        if field_type:
                             # Check compatibility
                             if 'REGULAR' not in operator_scope and 'MATRIX' not in operator_scope and 'VECTOR' not in operator_scope:
                                 # Operator has no scope defined, assume it works with all
