@@ -154,7 +154,42 @@ class FASTEXPRParser:
                 self.data_fields[field_id] = field
                 field_type = field.get('type', 'REGULAR')
                 self.field_types[field_id] = field_type
-    
+
+    @staticmethod
+    def _metadata_contains_event(value) -> bool:
+        """Check structured field metadata for an explicit event classification."""
+        if isinstance(value, dict):
+            return any(
+                FASTEXPRParser._metadata_contains_event(item)
+                for key, item in value.items()
+                if str(key).lower() in {
+                    "name", "type", "category", "subcategory", "description",
+                    "value", "label"
+                }
+            )
+        if isinstance(value, (list, tuple, set)):
+            return any(FASTEXPRParser._metadata_contains_event(item) for item in value)
+        return "event" in str(value or "").strip().lower()
+
+    def _is_event_input_field(self, field_name: str) -> bool:
+        """Return whether API metadata explicitly classifies a field as event input."""
+        field_info = self.data_fields.get(field_name, {}) or {}
+        field_type = str(field_info.get("type", "")).strip().lower()
+        return (
+            field_type == "event"
+            or self._metadata_contains_event(field_info.get("category", {}))
+            or self._metadata_contains_event(field_info.get("subcategory", {}))
+        )
+
+    @staticmethod
+    def _iter_field_nodes(node: ASTNode):
+        """Yield every field node nested anywhere below an AST node."""
+        if node.node_type == "field":
+            yield node
+            return
+        for child in node.children:
+            yield from FASTEXPRParser._iter_field_nodes(child)
+
     def parse(self, template: str) -> Tuple[Optional[ASTNode], List[SyntaxError]]:
         """
         Parse FASTEXPR template into AST
@@ -480,29 +515,31 @@ class FASTEXPRParser:
                     child_errors = self._validate_ast(child, template)
                     errors.extend(child_errors)
                     
-                    # Check field-operator compatibility
-                    if child.node_type == 'field':
-                        field_name = child.value
-                        field_type = self.field_types.get(field_name)
-                        
-                        # Check if field is event input type
-                        field_info = self.data_fields.get(field_name, {})
-                        is_event_input = field_info.get('type') == 'EVENT' or 'event' in str(field_info.get('category', '')).lower()
-                        
-                        # Check event input compatibility (learned from simulation errors)
-                        if is_event_input and operator_name in self.event_input_incompatible_operators:
+                    # Check event-input compatibility against every field nested
+                    # inside this operator's arguments, not only immediate field
+                    # children (e.g. abs(ts_mean(event_field)).
+                    for field_node in self._iter_field_nodes(child):
+                        field_name = field_node.value
+                        if (
+                            self._is_event_input_field(field_name)
+                            and operator_name in self.event_input_incompatible_operators
+                        ):
                             errors.append(SyntaxError(
                                 'event_input_incompatible',
                                 f'Operator {operator_name} does not support event inputs (field: {field_name})',
-                                child.position,
+                                field_node.position,
                                 template,
                                 operator_name=operator_name,
                                 field_name=field_name,
                                 expected_type='NON_EVENT',
                                 actual_type='EVENT'
                             ))
-                        
-                        if field_type:
+
+                    # Check field-operator compatibility for direct field arguments.
+                    if child.node_type == 'field':
+                        field_name = child.value
+                        field_type = self.field_types.get(field_name)
+
                             # Check compatibility
                             if 'REGULAR' not in operator_scope and 'MATRIX' not in operator_scope and 'VECTOR' not in operator_scope:
                                 # Operator has no scope defined, assume it works with all
