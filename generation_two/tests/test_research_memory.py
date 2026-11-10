@@ -3,6 +3,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 
 from generation_two.research_memory import ResearchMemory
 
@@ -79,7 +80,10 @@ class ResearchMemoryTests(unittest.TestCase):
         result["timestamp"] = 201.0
         self.memory.record_result(result)
 
-        with sqlite3.connect(self.db_path) as conn:
+        # sqlite3.Connection's context manager commits/rolls back but does
+        # not close the connection. Explicitly close it so Windows can remove
+        # the TemporaryDirectory during tearDown.
+        with closing(sqlite3.connect(self.db_path)) as conn:
             count = conn.execute(
                 "SELECT COUNT(*) FROM research_experiments WHERE alpha_id = ?",
                 ("alpha-2",),
