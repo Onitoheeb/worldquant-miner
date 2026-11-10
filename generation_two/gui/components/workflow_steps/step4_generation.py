@@ -547,6 +547,12 @@ Generate a valid FASTEXPR expression that uses operator(data_field, parameters) 
                                     continue
                                 if name.lower().startswith("vec_"):
                                     continue
+                                # This local placeholder path pairs operators with
+                                # arbitrary randomly selected fields. densify requires
+                                # a known GROUP field, so it must be generated only by a
+                                # type-directed research path, never by random selection.
+                                if name.lower() == "densify":
+                                    continue
                                 scopes = {
                                     str(scope).upper()
                                     for scope in (getattr(metadata, "scope", None) or [])
