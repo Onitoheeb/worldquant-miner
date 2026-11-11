@@ -41,6 +41,9 @@ class TemplateValidator:
             self.parser = FASTEXPRParser(operators=operators, data_fields=data_fields)
             # Pass db_path to parser so it can be used by SelfCorrectingAST
             self.parser.db_path = self.db_path
+            # Reuse BRAIN-observed event-input restrictions across application
+            # restarts; the JSON catalogue alone does not contain learned rules.
+            self.parser.load_event_input_knowledge_from_db(self.db_path)
             self.corrector = SelfCorrectingAST(self.parser)
             self.validator = FASTEXPRValidator(self.parser, self.corrector)
             # Initialize compiler for full compilation pipeline
