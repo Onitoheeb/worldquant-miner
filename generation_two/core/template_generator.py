@@ -590,13 +590,12 @@ class TemplateGenerator:
             universe=universe
         )
         
-        # Store field types (including event input detection) in database
+        # Persist explicit classifications, then enrich API fields from the
+        # region/delay-specific database catalogue before validation or search.
         if fields:
             self._store_field_types(fields, region, delay)
+            fields = self._load_event_input_metadata(fields, region, delay)
 
-            # The validator is initialized before regional fields are fetched.
-            # Keep its AST metadata in sync so event-input restrictions are
-            # enforced locally before expressions reach BRAIN.
             if self.template_validator:
                 self.template_validator.update_data_fields(fields)
         
@@ -610,8 +609,68 @@ class TemplateGenerator:
         
         return fields
     
+    def _load_event_input_metadata(
+        self,
+        fields: List[Dict],
+        region: str,
+        delay: int
+    ) -> List[Dict]:
+        """Attach persisted event-input flags to fields for the active region/delay.
+
+        Missing or NULL classifications are rejected rather than silently
+        treating an unknown field as a non-event input.
+        """
+        if not fields:
+            return []
+
+        import sqlite3
+        from ..storage.backtest_storage import BacktestStorage
+
+        storage = BacktestStorage(self.db_path)
+        with sqlite3.connect(storage.db_path, timeout=30) as conn:
+            conn.execute("PRAGMA busy_timeout = 30000")
+            records = conn.execute(
+                """
+                SELECT field_id, is_event_input
+                FROM field_types
+                WHERE region = ? AND delay = ?
+                """,
+                (region, delay),
+            ).fetchall()
+
+        classifications = {
+            field_id: is_event_input
+            for field_id, is_event_input in records
+        }
+
+        missing = [
+            field.get("id", "")
+            for field in fields
+            if field.get("id") and (
+                field.get("id") not in classifications
+                or classifications[field.get("id")] is None
+            )
+        ]
+        if missing:
+            sample = ", ".join(missing[:10])
+            raise ValueError(
+                f"Missing explicit event-input classification for "
+                f"{len(missing)} {region} delay={delay} fields: {sample}. "
+                "Classify these fields in field_types before generating."
+            )
+
+        enriched_fields = []
+        for field in fields:
+            field_id = field.get("id", "")
+            enriched = dict(field)
+            if field_id:
+                enriched["is_event_input"] = bool(classifications[field_id])
+            enriched_fields.append(enriched)
+
+        return enriched_fields
+
     def _store_field_types(self, fields: List[Dict], region: str, delay: int):
-        """Store field type information in one SQLite transaction."""
+        """Persist field metadata without inferring event status from text."""
         if not fields:
             return
 
@@ -622,48 +681,75 @@ class TemplateGenerator:
 
             storage = BacktestStorage(self.db_path)
             rows = []
+
             for field in fields:
-                field_id = field.get('id', '')
+                field_id = field.get("id", "")
                 if not field_id:
                     continue
 
-                field_type = field.get('type', 'REGULAR')
-                category = field.get('category', {})
-                category_name = category.get('name', '') if isinstance(category, dict) else str(category)
-                is_event_input = (
-                    field_type == 'EVENT'
-                    or 'event' in str(field_type).lower()
-                    or 'event' in category_name.lower()
-                    or 'event' in str(field.get('name', '')).lower()
-                    or 'event' in str(field.get('description', '')).lower()
+                field_type = field.get("type", "REGULAR")
+                category = field.get("category", {})
+                category_name = (
+                    category.get("name", "")
+                    if isinstance(category, dict)
+                    else str(category)
                 )
+
+                explicit_flag = field.get("is_event_input")
+                if isinstance(explicit_flag, bool):
+                    is_event_input = int(explicit_flag)
+                elif isinstance(explicit_flag, int) and explicit_flag in (0, 1):
+                    is_event_input = explicit_flag
+                else:
+                    # NULL means unknown. On conflict, preserve the existing
+                    # region/delay-specific classification.
+                    is_event_input = None
 
                 rows.append((
                     field_id,
                     region,
                     delay,
                     field_type,
-                    1 if is_event_input else 0,
+                    is_event_input,
                     category_name,
-                    json.dumps(field)
+                    json.dumps(field),
                 ))
 
             if not rows:
                 return
 
-            # A single connection, batch write, and busy timeout avoid repeatedly
-            # acquiring SQLite's write lock once per field across worker threads.
             with sqlite3.connect(storage.db_path, timeout=30) as conn:
                 conn.execute("PRAGMA busy_timeout = 30000")
-                conn.executemany('''
-                    INSERT OR REPLACE INTO field_types
-                    (field_id, region, delay, field_type, is_event_input, category, field_data, updated_at)
+                conn.executemany(
+                    """
+                    INSERT INTO field_types (
+                        field_id, region, delay, field_type,
+                        is_event_input, category, field_data, updated_at
+                    )
                     VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                ''', rows)
+                    ON CONFLICT(field_id, region, delay)
+                    DO UPDATE SET
+                        field_type = excluded.field_type,
+                        category = excluded.category,
+                        field_data = excluded.field_data,
+                        is_event_input = COALESCE(
+                            excluded.is_event_input,
+                            field_types.is_event_input
+                        ),
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    rows,
+                )
 
-            logger.debug(f"Stored {len(rows)} field types for {region} delay={delay}")
+            logger.debug(
+                "Stored %s field records for %s delay=%s",
+                len(rows), region, delay
+            )
         except Exception as e:
-            logger.warning(f"Failed to store field types for {region} delay={delay}: {e}")
+            logger.warning(
+                "Failed to store field types for %s delay=%s: %s",
+                region, delay, e
+            )
 
     def generate_templates_for_region(
         self,
@@ -705,13 +791,13 @@ class TemplateGenerator:
                         validator.operators = operators
                         logger.info(f"✅ Updated validator with {len(operators)} operators (AST disabled)")
             
-            # Update data fields for this region
-            if validator.use_ast and validator.parser:
-                validator.parser.add_data_fields(data_fields)
-                logger.info(f"✅ Updated validator with {len(data_fields)} data fields for {region}")
-            else:
-                validator.data_fields = data_fields
-                logger.info(f"✅ Updated validator with {len(data_fields)} data fields for {region} (AST disabled)")
+            # Replace active regional metadata; do not merge fields from a
+            # previously selected region into the current parser.
+            validator.update_data_fields(data_fields)
+            logger.info(
+                "Updated validator with %s classified data fields for %s",
+                len(data_fields), region
+            )
         
         # Get storage instance for template similarity checking
         from ..storage.backtest_storage import BacktestStorage
