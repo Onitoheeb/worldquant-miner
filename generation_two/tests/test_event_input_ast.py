@@ -8,6 +8,11 @@ class EventInputASTTests(unittest.TestCase):
         operators = [
             {"name": name, "scope": ["REGULAR"]}
             for name in ("add", "subtract", "multiply", "divide", "rank")
+        ] + [
+            {"name": "is_nan", "scope": ["REGULAR"], "definition": "is_nan(input)"},
+            {"name": "reverse", "scope": ["REGULAR"], "definition": "reverse(x)"},
+            {"name": "sign", "scope": ["REGULAR"], "definition": "sign(x)"},
+            {"name": "sqrt", "scope": ["REGULAR"], "definition": "sqrt(x)"},
         ]
         data_fields = [
             {
@@ -60,6 +65,29 @@ class EventInputASTTests(unittest.TestCase):
 
     def test_nested_operator_checks_event_field(self):
         self._assert_event_error("rank(event_field)", "rank")
+
+    def test_rejects_extra_argument_to_is_nan(self):
+        _, errors = self.parser.parse("is_nan(regular_field, 30)")
+        self.assertTrue(any(
+            error.error_type == "invalid_operator_arguments"
+            and error.operator_name == "is_nan"
+            for error in errors
+        ))
+
+    def test_rejects_extra_argument_to_reverse(self):
+        _, errors = self.parser.parse("reverse(sign(regular_field), 10)")
+        self.assertTrue(any(
+            error.error_type == "invalid_operator_arguments"
+            and error.operator_name == "reverse"
+            for error in errors
+        ))
+
+    def test_accepts_catalogue_valid_unary_calls(self):
+        _, errors = self.parser.parse("sqrt(reverse(sign(regular_field)))")
+        self.assertFalse(
+            [error for error in errors if error.error_type == "invalid_operator_arguments"],
+            msg=f"Unexpected arity errors: {errors}",
+        )
 
 
 if __name__ == "__main__":
