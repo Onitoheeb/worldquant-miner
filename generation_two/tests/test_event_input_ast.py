@@ -20,18 +20,21 @@ class EventInputASTTests(unittest.TestCase):
                 "id": "event_field",
                 "type": "MATRIX",
                 "name": "Event metric",
+                "is_event_input": True,
             },
             {
                 "id": "event_description_field",
                 "type": "MATRIX",
                 "name": "Metric",
                 "description": "A field derived from event data",
+                "is_event_input": False,
             },
             {
                 "id": "regular_field",
                 "type": "MATRIX",
                 "name": "Revenue",
                 "description": "Standard financial metric",
+                "is_event_input": False,
             },
         ]
         self.parser = FASTEXPRParser(
@@ -61,8 +64,14 @@ class EventInputASTTests(unittest.TestCase):
     def test_unary_negation_is_checked_as_multiply(self):
         self._assert_event_error("-event_field", "multiply")
 
-    def test_event_metadata_in_description_is_recognized(self):
-        self._assert_event_error("event_description_field + regular_field", "add")
+    def test_description_alone_does_not_classify_field_as_event(self):
+        _, errors = self.parser.parse(
+            "event_description_field + regular_field"
+        )
+        self.assertFalse(any(
+            error.error_type == "event_input_incompatible"
+            for error in errors
+        ))
 
     def test_nested_operator_checks_event_field(self):
         self._assert_event_error("rank(event_field)", "rank")
@@ -109,6 +118,7 @@ class EventInputASTTests(unittest.TestCase):
                 "type": "MATRIX",
                 "name": "Event metric",
                 "description": "Event-derived data",
+                "is_event_input": True,
             }
         ])
 
