@@ -126,6 +126,46 @@ class EventInputASTTests(unittest.TestCase):
         self.assertFalse(valid)
         self.assertIn("does not support event inputs", error)
 
+    def test_unknown_event_classification_is_not_inferred_from_text(self):
+        parser = FASTEXPRParser(
+            operators=[{"name": "add", "scope": ["REGULAR"]}],
+            data_fields=[{
+                "id": "event_named_unknown",
+                "type": "VECTOR",
+                "name": "event sentiment",
+                "description": "News event sentiment value",
+            }],
+        )
+        self.assertFalse(parser._is_event_input_field("event_named_unknown"))
+
+    def test_ambiguous_error_does_not_guess_first_expression_operator(self):
+        import os
+        import sqlite3
+        import tempfile
+
+        handle, db_path = tempfile.mkstemp(suffix=".sqlite")
+        os.close(handle)
+        try:
+            validator = TemplateValidator(
+                operators=[{"name": "rank", "scope": ["REGULAR"]}],
+                data_fields=[],
+                db_path=db_path,
+                use_ast=True,
+            )
+            validator._learn_event_input_compatibility(
+                "rank(event_field)",
+                "Invalid input data for this expression",
+            )
+            with sqlite3.connect(db_path) as conn:
+                rows = conn.execute(
+                    "SELECT operator_name FROM compiler_knowledge "
+                    "WHERE knowledge_type = 'event_input_incompatible'"
+                ).fetchall()
+            self.assertEqual(rows, [])
+            self.assertNotIn("rank", validator.parser.event_input_incompatible_operators)
+        finally:
+            os.unlink(db_path)
+
     def test_event_repair_does_not_guess_ts_operator_replacement(self):
         validator = TemplateValidator(
             operators=[
