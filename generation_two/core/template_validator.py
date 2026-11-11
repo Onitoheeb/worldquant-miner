@@ -83,6 +83,25 @@ class TemplateValidator:
             ],
         }
     
+    def update_data_fields(self, data_fields: List[Dict]) -> None:
+        """Replace the active field catalogue used by FASTEXPR validation.
+
+        The validator is created before region fields are fetched. Without this
+        update, its parser keeps an empty/stale metadata catalogue and cannot
+        detect event inputs before BRAIN submission.
+        """
+        self.data_fields = list(data_fields or [])
+        if self.use_ast and self.parser:
+            # Field IDs can overlap between regions. Replace, rather than merge,
+            # so metadata from a previous region cannot classify the active one.
+            self.parser.data_fields.clear()
+            self.parser.field_types.clear()
+            self.parser.add_data_fields(self.data_fields)
+            logger.info(
+                "Updated FASTEXPR validator with %s field metadata records",
+                len(self.data_fields),
+            )
+
     def _cleanup_template(self, template: str) -> str:
         """
         Apply only safe outer formatting cleanup.
@@ -929,12 +948,9 @@ FIXED EXPRESSION:"""
             
             # Step 1.5: Fix event input errors by replacing operators (CRITICAL - retry until success)
             if is_event_input_error:
-                # ALWAYS use aggressive fix for event input errors to ensure ALL operators are replaced
-                logger.info("🔧 Applying aggressive event input fix to replace ALL incompatible operators...")
-                current_template = self._aggressive_event_input_fix(current_template, error_message, region)
-                all_fixes.append("Applied aggressive event input fix (replaced all incompatible operators)")
-                
-                # Also try targeted fix for the specific operator mentioned in error
+                # Only apply a replacement backed by explicit compatibility
+                # evidence. Never report a rewrite when the expression is unchanged.
+                logger.info("Checking for a verified event-input operator replacement...")
                 fixed_template, operator_fixes = self._fix_event_input_error(current_template, error_message, region)
                 if operator_fixes:
                     all_fixes.extend([f"EventInput: {f}" for f in operator_fixes])
@@ -1173,36 +1189,15 @@ FIXED EXPRESSION:"""
                     fixed_template = re.sub(pattern, replacement, fixed_template, flags=re.IGNORECASE)
                     fixes.append(f"Replaced {problematic_operator} with {replacement} (event input compatible)")
             else:
-                # No direct replacement - try wrapping with ts_* or using vec_* operators
-                # For arithmetic operators, try ts_* prefix
-                if problematic_operator in ['multiply', 'add', 'subtract', 'divide']:
-                    ts_version = 'ts_' + problematic_operator
-                    pattern = r'\b' + re.escape(problematic_operator) + r'\s*\('
-                    if re.search(pattern, fixed_template, re.IGNORECASE):
-                        fixed_template = re.sub(pattern, ts_version + '(', fixed_template, flags=re.IGNORECASE)
-                        fixes.append(f"Replaced {problematic_operator} with {ts_version} (event input compatible)")
-                else:
-                    # For cross-sectional operators, try removing or wrapping
-                    logger.warning(f"⚠️ No replacement found for {problematic_operator} with event inputs")
-                    fixes.append(f"Could not find replacement for {problematic_operator}")
-        
-        # If still no replacement found, try to identify event input fields and replace operators
-        if not fixes and region:
-            # Get event input fields for this region
-            event_fields = self._get_event_input_fields(region, delay=1)
-            
-            # Check if template uses event input fields
-            field_pattern = r'\b([a-z][a-z0-9_]{10,})\b'
-            template_fields = set(re.findall(field_pattern, template))
-            
-            if template_fields.intersection(event_fields) if event_fields else True:  # Assume true if unknown
-                # Template uses event inputs - replace all incompatible operators
-                logger.info(f"🔧 Template uses event input fields, replacing all incompatible operators")
-                fixed_template = self._aggressive_event_input_fix(template, error_message, region)
-                if fixed_template != template:
-                    fixes.append("Replaced all incompatible operators with ts_* versions for event inputs")
-                    return fixed_template, fixes
-        
+                # No evidence-backed replacement is available. In particular,
+                # do not infer that ts_<operator> accepts event inputs merely
+                # because its name resembles the rejected operator.
+                logger.warning(
+                    "No verified event-input replacement for operator %s; "
+                    "leaving expression unchanged",
+                    problematic_operator,
+                )
+
         return fixed_template, fixes
     
     def _learn_event_input_compatibility(self, template: str, error_message: str):
