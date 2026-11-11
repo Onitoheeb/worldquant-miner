@@ -1512,15 +1512,36 @@ FIXED EXPRESSION:"""
             expected = int(input_count_match.group(2))
         
         if expected is not None and actual is not None:
-            logger.info(f"🔧 Fixing input count: operator has {actual} inputs, needs {expected}")
+            # BRAIN often returns only the input counts, without naming the
+            # offending operator. Never strip arguments from every call that
+            # happens to have the same arity: nested calls may legitimately need
+            # those arguments (for example, a time-series lookback).
+            named_operator = re.search(
+                r'\\b(?:operator|function)\\s+["\\']?([a-z_][a-z0-9_]*)',
+                error_message,
+                re.IGNORECASE,
+            )
+            if not named_operator:
+                logger.warning(
+                    "Cannot safely repair generic input-count error: BRAIN did not identify the offending operator; leaving expression unchanged"
+                )
+                return template, []
+
+            target_operator = named_operator.group(1).lower()
+            logger.info(
+                "🔧 Fixing input count for BRAIN-identified operator %s: %s -> %s",
+                target_operator, actual, expected
+            )
             
-            # Find operators in template that might have wrong parameter count
+            # Find only the operator named by BRAIN, not unrelated nested calls
             # Pattern: operator_name(param1, param2, ...)
             operator_pattern = r'\b([a-z_]+)\s*\('
             operators = re.finditer(operator_pattern, fixed_template, re.IGNORECASE)
             
             for op_match in operators:
                 op_name = op_match.group(1)
+                if op_name.lower() != target_operator:
+                    continue
                 op_start = op_match.start()
                 
                 # Find the matching closing parenthesis
@@ -1582,8 +1603,14 @@ FIXED EXPRESSION:"""
                             break
                     i += 1
         
-        # If no specific fix found, try prompt engineering approach
+        # Do not ask the LLM to invent defaults for an operator signature.
+        # If the identified call cannot be repaired from explicit arity evidence,
+        # leave it unchanged for manual/catalogue-backed handling.
         if not fixes and self.ollama_manager:
+            logger.warning("Skipping AI arity repair: no verified operator signature is available")
+            return template, []
+
+        if False and not fixes and self.ollama_manager:
             logger.info("🔧 Trying prompt engineering for input count fix...")
             prompt = f"""Fix this FASTEXPR expression that has wrong number of operator parameters:
 
