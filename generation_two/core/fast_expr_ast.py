@@ -193,9 +193,9 @@ class FASTEXPRParser:
 
                 name = str(operator_name).strip().lower()
                 pattern = (
-                    r"(?:operator\\s+)?" + re.escape(name) +
-                    r"\\s+(?:does\\s+not\\s+support|expects\\s+only)"
-                    r"\\s+event\\s+inputs"
+                    r"(?:operator\s+)?" + re.escape(name) +
+                    r"\s+(?:does\s+not\s+support|expects\s+only)"
+                    r"\s+event\s+inputs"
                 )
                 if re.search(pattern, str(error_message), re.IGNORECASE):
                     learned.add(name)
