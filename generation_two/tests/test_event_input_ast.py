@@ -1,6 +1,7 @@
 import unittest
 
 from generation_two.core.fast_expr_ast import FASTEXPRParser
+from generation_two.core.template_validator import TemplateValidator
 
 
 class EventInputASTTests(unittest.TestCase):
@@ -88,6 +89,49 @@ class EventInputASTTests(unittest.TestCase):
             [error for error in errors if error.error_type == "invalid_operator_arguments"],
             msg=f"Unexpected arity errors: {errors}",
         )
+
+
+    def test_validator_uses_field_metadata_loaded_after_initialization(self):
+        validator = TemplateValidator(
+            operators=[
+                {"name": "is_nan", "scope": ["REGULAR"], "definition": "is_nan(input)"}
+            ],
+            data_fields=[],
+            use_ast=True,
+        )
+        validator.parser.event_input_incompatible_operators.add("is_nan")
+
+        # This mirrors TemplateGenerator fetching regional fields after the
+        # validator itself has already been constructed.
+        validator.update_data_fields([
+            {
+                "id": "event_field",
+                "type": "MATRIX",
+                "name": "Event metric",
+                "description": "Event-derived data",
+            }
+        ])
+
+        valid, error, _ = validator.validate_template("is_nan(event_field)")
+        self.assertFalse(valid)
+        self.assertIn("does not support event inputs", error)
+
+    def test_event_repair_does_not_guess_ts_operator_replacement(self):
+        validator = TemplateValidator(
+            operators=[
+                {"name": "add", "scope": ["REGULAR"], "definition": "add(x, y)"}
+            ],
+            data_fields=[],
+            use_ast=True,
+        )
+        expression = "add(event_field, regular_field)"
+        fixed, fixes = validator._fix_event_input_error(
+            expression,
+            "Operator add does not support event inputs",
+            region="USA",
+        )
+        self.assertEqual(fixed, expression)
+        self.assertEqual(fixes, [])
 
 
 if __name__ == "__main__":
