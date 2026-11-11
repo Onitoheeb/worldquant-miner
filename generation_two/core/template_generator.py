@@ -593,6 +593,12 @@ class TemplateGenerator:
         # Store field types (including event input detection) in database
         if fields:
             self._store_field_types(fields, region, delay)
+
+            # The validator is initialized before regional fields are fetched.
+            # Keep its AST metadata in sync so event-input restrictions are
+            # enforced locally before expressions reach BRAIN.
+            if self.template_validator:
+                self.template_validator.update_data_fields(fields)
         
         # Update search engine with fetched fields
         if self.search_engine and fields:
