@@ -155,6 +155,42 @@ class FASTEXPRParser:
                 field_type = field.get('type', 'REGULAR')
                 self.field_types[field_id] = field_type
 
+    def load_event_input_knowledge_from_db(self, db_path: Optional[str] = None) -> int:
+        """Load BRAIN-observed event-input incompatibilities persisted in SQLite."""
+        path = db_path or getattr(self, "db_path", None)
+        if not path or not Path(path).exists():
+            return 0
+
+        conn = None
+        try:
+            import sqlite3
+            conn = sqlite3.connect(path, timeout=5)
+            rows = conn.execute(
+                """
+                SELECT DISTINCT operator_name
+                FROM compiler_knowledge
+                WHERE knowledge_type = 'event_input_incompatible'
+                  AND compatibility_status = 'incompatible'
+                """
+            ).fetchall()
+            learned = {
+                str(row[0]).strip().lower()
+                for row in rows
+                if row and row[0]
+            }
+            self.event_input_incompatible_operators.update(learned)
+            logger.info(
+                "Loaded %s BRAIN-learned event-input restrictions from %s",
+                len(learned), path
+            )
+            return len(learned)
+        except Exception as exc:
+            logger.debug("Could not load persisted event-input knowledge: %s", exc)
+            return 0
+        finally:
+            if conn is not None:
+                conn.close()
+
     @staticmethod
     def _metadata_contains_event(value) -> bool:
         """Check structured field metadata for an explicit event classification."""
