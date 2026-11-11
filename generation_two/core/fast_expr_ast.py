@@ -465,7 +465,7 @@ class FASTEXPRParser:
         """
         name = str(operator.get("name", "")).strip()
         definition = str(operator.get("definition", "")).strip()
-        match = re.match(r"^([a-zA-Z_][a-zA-Z0-9_]*)\\s*\\((.*)\\)", definition)
+        match = re.match(r"^([a-zA-Z_][a-zA-Z0-9_]*)\s*\((.*)\)", definition)
         if not match or match.group(1) != name:
             return None
 
@@ -479,7 +479,7 @@ class FASTEXPRParser:
         start = 0
         for index, char in enumerate(params_text):
             if quote:
-                if char == quote and (index == 0 or params_text[index - 1] != "\\\\"):
+                if char == quote and (index == 0 or params_text[index - 1] != "\\"):
                     quote = None
                 continue
             if char in ("'", '"'):
