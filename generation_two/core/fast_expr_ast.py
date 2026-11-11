@@ -156,7 +156,12 @@ class FASTEXPRParser:
                 self.field_types[field_id] = field_type
 
     def load_event_input_knowledge_from_db(self, db_path: Optional[str] = None) -> int:
-        """Load BRAIN-observed event-input incompatibilities persisted in SQLite."""
+        """Load only operator restrictions backed by explicit BRAIN error text.
+
+        Older versions guessed the first operator in an expression when the
+        error did not name one. Those rows are ignored, even if they remain in
+        SQLite, so historical guesses cannot poison current validation.
+        """
         path = db_path or getattr(self, "db_path", None)
         if not path or not Path(path).exists():
             return 0
@@ -167,20 +172,37 @@ class FASTEXPRParser:
             conn = sqlite3.connect(path, timeout=5)
             rows = conn.execute(
                 """
-                SELECT DISTINCT operator_name
+                SELECT operator_name, error_message, metadata
                 FROM compiler_knowledge
                 WHERE knowledge_type = 'event_input_incompatible'
                   AND compatibility_status = 'incompatible'
                 """
             ).fetchall()
-            learned = {
-                str(row[0]).strip().lower()
-                for row in rows
-                if row and row[0]
-            }
+
+            learned = set()
+            for operator_name, error_message, metadata_raw in rows:
+                if not operator_name or not error_message:
+                    continue
+                try:
+                    metadata = json.loads(metadata_raw) if metadata_raw else {}
+                except (TypeError, ValueError):
+                    metadata = {}
+
+                if metadata.get("extracted_from_template"):
+                    continue
+
+                name = str(operator_name).strip().lower()
+                pattern = (
+                    r"(?:operator\\s+)?" + re.escape(name) +
+                    r"\\s+(?:does\\s+not\\s+support|expects\\s+only)"
+                    r"\\s+event\\s+inputs"
+                )
+                if re.search(pattern, str(error_message), re.IGNORECASE):
+                    learned.add(name)
+
             self.event_input_incompatible_operators.update(learned)
             logger.info(
-                "Loaded %s BRAIN-learned event-input restrictions from %s",
+                "Loaded %s explicitly BRAIN-confirmed event-input restrictions from %s",
                 len(learned), path
             )
             return len(learned)
@@ -837,28 +859,13 @@ class SelfCorrectingAST:
         self._load_compiler_knowledge()
     
     def _load_compiler_knowledge(self):
-        """Load compiler knowledge from database (event input incompatibilities, etc.) - OPTIMIZED"""
+        """Load only evidence-checked event-input restrictions from SQLite."""
         try:
-            from ..storage.backtest_storage import BacktestStorage
-            # Use db_path from parser if available, otherwise use default
-            db_path = getattr(self.parser, 'db_path', 'generation_two_backtests.db')
-            storage = BacktestStorage(db_path)
-            
-            # Load only event input incompatibilities (targeted query, no limit needed for this small set)
-            knowledge = storage.get_compiler_knowledge(
-                knowledge_type='event_input_incompatible',
-                limit=50  # Reasonable limit for event input operators
-            )
-            for record in knowledge:
-                operator_name = record.get('operator_name')
-                if operator_name:
-                    if not hasattr(self.parser, 'event_input_incompatible_operators'):
-                        self.parser.event_input_incompatible_operators = set()
-                    self.parser.event_input_incompatible_operators.add(operator_name.lower())
-                    logger.debug(f"Loaded compiler knowledge: {operator_name} does not support event inputs")
-        except Exception as e:
-            logger.debug(f"Failed to load compiler knowledge: {e}")
-    
+            db_path = getattr(self.parser, "db_path", "generation_two_backtests.db")
+            self.parser.load_event_input_knowledge_from_db(db_path)
+        except Exception as exc:
+            logger.debug("Failed to load verified compiler knowledge: %s", exc)
+
     def learn_from_error(self, template: str, error_message: str, fixed_template: Optional[str] = None):
         """Learn from a template error"""
         self.failed_templates.append((template, error_message))
