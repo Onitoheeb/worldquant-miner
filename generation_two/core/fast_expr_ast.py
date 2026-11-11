@@ -208,21 +208,19 @@ class FASTEXPRParser:
         return "event" in str(value or "").strip().lower()
 
     def _is_event_input_field(self, field_name: str) -> bool:
-        """Return whether API metadata explicitly classifies a field as event input."""
+        """Return event status only from explicit field classification."""
         field_info = self.data_fields.get(field_name, {}) or {}
-        field_type = str(field_info.get("type", "")).strip().lower()
-        # Keep this classification aligned with TemplateGenerator._store_field_types.
-        # BRAIN field metadata may identify event inputs through the field type,
-        # category, subcategory, name, or description. Looking only at type and
-        # category misses fields whose API type is MATRIX/REGULAR but whose
-        # description/name marks them as event data.
-        return (
-            "event" in field_type
-            or any(
-                self._metadata_contains_event(field_info.get(key))
-                for key in ("category", "subcategory", "name", "description")
-            )
-        )
+        explicit_flag = field_info.get("is_event_input")
+
+        if isinstance(explicit_flag, bool):
+            return explicit_flag
+
+        if isinstance(explicit_flag, int) and explicit_flag in (0, 1):
+            return bool(explicit_flag)
+
+        # Unknown classifications are rejected earlier by the field-catalogue
+        # loader. Never infer event status from names, categories or descriptions.
+        return False
 
     @staticmethod
     def _iter_field_nodes(node: ASTNode):
