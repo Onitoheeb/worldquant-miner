@@ -1201,109 +1201,75 @@ FIXED EXPRESSION:"""
         return fixed_template, fixes
     
     def _learn_event_input_compatibility(self, template: str, error_message: str):
-        """Learn about event input compatibility from errors and store in database"""
+        """Persist incompatibility only when BRAIN explicitly names the operator."""
         import re
-        logger.info(f"📚 _learn_event_input_compatibility called for: {error_message[:100]}")
-        
-        # Extract operator and learn that it doesn't support event inputs
-        # Try multiple patterns to catch different error message formats
-        operator_match = re.search(r'Operator\s+(\w+)\s+(?:does not support|expects only)\s+event inputs', error_message, re.IGNORECASE)
+
+        logger.info(
+            "Learning event-input compatibility from BRAIN error: %s",
+            error_message[:160],
+        )
+        operator_match = re.search(
+            r"(?:Operator\\s+)?([A-Za-z_][A-Za-z0-9_]*)\\s+"
+            r"(?:does\\s+not\\s+support|expects\\s+only)\\s+event\\s+inputs",
+            error_message,
+            re.IGNORECASE,
+        )
         if not operator_match:
-            operator_match = re.search(r'(\w+)\s+(?:does not support|expects only)\s+event inputs', error_message, re.IGNORECASE)
-        if not operator_match:
-            # Try pattern: "Operator X does not support event inputs" or "X does not support event inputs"
-            operator_match = re.search(r'(?:Operator\s+)?(\w+)\s+does\s+not\s+support\s+event\s+inputs', error_message, re.IGNORECASE)
-        if not operator_match:
-            # Try pattern: "Operator X expects only event inputs"
-            operator_match = re.search(r'(?:Operator\s+)?(\w+)\s+expects\s+only\s+event\s+inputs', error_message, re.IGNORECASE)
-        
-        if operator_match:
-            logger.info(f"📚 Found operator match: {operator_match.group(1)}")
-            operator_name = operator_match.group(1).lower()
-            
-            # Store in parser's knowledge base (in-memory) - only if AST is enabled
+            logger.warning(
+                "Not learning event-input incompatibility: BRAIN error did not "
+                "identify a specific operator. Expression operators will not "
+                "be guessed. Error: %s",
+                error_message[:160],
+            )
+            return
+
+        operator_name = operator_match.group(1).lower()
+        if self.use_ast and self.parser:
+            self.parser.event_input_incompatible_operators.add(operator_name)
+
+        try:
+            from ..storage.backtest_storage import BacktestStorage
+
+            storage = BacktestStorage(self.db_path)
+            ast_pattern = None
             if self.use_ast and self.parser:
-                if not hasattr(self.parser, 'event_input_incompatible_operators'):
-                    self.parser.event_input_incompatible_operators = set()
-                self.parser.event_input_incompatible_operators.add(operator_name)
-            
-            # Store in database for persistence (always, regardless of AST setting)
-            try:
-                from ..storage.backtest_storage import BacktestStorage
-                storage = BacktestStorage(self.db_path)
-                
-                # Extract replacement operator if available
-                replacement = None
-                if hasattr(self, '_fix_event_input_error'):
-                    # Check replacement mapping
-                    # No replacement is marked verified until BRAIN confirms
-                    # that it accepts the candidate with the relevant event field.
-                    event_input_replacements = {}
-                    replacement = event_input_replacements.get(operator_name)
-                
-                # Extract AST pattern from template (only if AST is enabled)
-                ast_pattern = None
-                if self.use_ast and self.parser:
-                    try:
-                        ast, _ = self.parser.parse(template)
-                        if ast:
-                            ast_pattern = self._extract_ast_structure(ast)
-                    except:
-                        pass
-                
-                logger.info(f"📚 Calling store_compiler_knowledge for operator: {operator_name}, replacement: {replacement}")
-                logger.info(f"📚 Database path: {self.db_path}")
-                
-                result = storage.store_compiler_knowledge(
-                    knowledge_type='event_input_incompatible',
-                    operator_name=operator_name,
-                    compatibility_status='incompatible',
-                    error_message=error_message,
-                    learned_from_template=template,
-                    learned_from_error=error_message,
-                    replacement_operator=replacement,
-                    ast_pattern=ast_pattern,
-                    compiler_rule=f"Operator {operator_name} does not support event inputs. Use {replacement} instead." if replacement else f"Operator {operator_name} does not support event inputs.",
-                    metadata={'learned_at': time.time()}
-                )
-                
-                if result:
-                    logger.info(f"✅ Successfully stored compiler knowledge: {operator_name} does not support event inputs (replacement: {replacement})")
-                else:
-                    logger.error(f"❌ store_compiler_knowledge returned False for operator: {operator_name}")
-            except Exception as e:
-                logger.error(f"❌ Failed to store compiler knowledge: {e}", exc_info=True)
-                logger.error(f"❌ Database path was: {self.db_path}")
-        else:
-            # Even if we can't extract operator name, store the error for learning
-            logger.warning(f"⚠️ Could not extract operator name from error message: {error_message[:100]}")
-            # Try to extract any operator name from the template
-            import re
-            operators_in_template = re.findall(r'\b([a-z_]+)\s*\(', template.lower())
-            if operators_in_template:
-                # Store knowledge for the first operator found
-                operator_name = operators_in_template[0]
-                logger.info(f"📚 Using first operator from template: {operator_name}")
                 try:
-                    from ..storage.backtest_storage import BacktestStorage
-                    storage = BacktestStorage(self.db_path)
-                    result = storage.store_compiler_knowledge(
-                        knowledge_type='event_input_incompatible',
-                        operator_name=operator_name,
-                        compatibility_status='incompatible',
-                        error_message=error_message,
-                        learned_from_template=template,
-                        learned_from_error=error_message,
-                        replacement_operator=None,
-                        ast_pattern=None,
-                        compiler_rule=f"Operator {operator_name} may not support event inputs (extracted from template)",
-                        metadata={'learned_at': time.time(), 'extracted_from_template': True}
-                    )
-                    if result:
-                        logger.info(f"✅ Stored compiler knowledge (extracted operator): {operator_name}")
-                except Exception as e:
-                    logger.error(f"❌ Failed to store compiler knowledge (extracted): {e}", exc_info=True)
-    
+                    ast, _ = self.parser.parse(template)
+                    if ast:
+                        ast_pattern = self._extract_ast_structure(ast)
+                except Exception:
+                    logger.debug("Could not extract AST for event-input evidence", exc_info=True)
+
+            result = storage.store_compiler_knowledge(
+                knowledge_type="event_input_incompatible",
+                operator_name=operator_name,
+                compatibility_status="incompatible",
+                error_message=error_message,
+                learned_from_template=template,
+                learned_from_error=error_message,
+                replacement_operator=None,
+                ast_pattern=ast_pattern,
+                compiler_rule=(
+                    f"Operator {operator_name} does not support event inputs."
+                ),
+                metadata={
+                    "learned_at": time.time(),
+                    "evidence_source": "explicit_brain_error",
+                },
+            )
+            if result:
+                logger.info(
+                    "Stored BRAIN-confirmed event-input restriction for %s",
+                    operator_name,
+                )
+            else:
+                logger.error(
+                    "Could not persist BRAIN-confirmed event-input restriction for %s",
+                    operator_name,
+                )
+        except Exception:
+            logger.exception("Failed to persist event-input compatibility evidence")
+
     def _extract_ast_structure(self, ast) -> str:
         """Extract AST structure as string representation"""
         if not ast:
