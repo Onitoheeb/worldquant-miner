@@ -175,10 +175,17 @@ class FASTEXPRParser:
         """Return whether API metadata explicitly classifies a field as event input."""
         field_info = self.data_fields.get(field_name, {}) or {}
         field_type = str(field_info.get("type", "")).strip().lower()
+        # Keep this classification aligned with TemplateGenerator._store_field_types.
+        # BRAIN field metadata may identify event inputs through the field type,
+        # category, subcategory, name, or description. Looking only at type and
+        # category misses fields whose API type is MATRIX/REGULAR but whose
+        # description/name marks them as event data.
         return (
-            field_type == "event"
-            or self._metadata_contains_event(field_info.get("category", {}))
-            or self._metadata_contains_event(field_info.get("subcategory", {}))
+            "event" in field_type
+            or any(
+                self._metadata_contains_event(field_info.get(key))
+                for key in ("category", "subcategory", "name", "description")
+            )
         )
 
     @staticmethod
@@ -647,7 +654,39 @@ class FASTEXPRParser:
                 ))
         
         elif ast.node_type == 'arithmetic':
-            # Validate children
+            # FASTEXPR arithmetic is lowered by BRAIN to named operators.
+            # In particular, unary negation is implemented as multiply by -1.
+            # Apply the same learned event-input rules to arithmetic nodes;
+            # otherwise expressions such as event_field + price_field bypass
+            # the function-call checks and are submitted to BRAIN invalid.
+            arithmetic_operator = {
+                '+': 'add',
+                '-': 'subtract',
+                '*': 'multiply',
+                '/': 'divide',
+                '^': 'power',
+                '%': 'modulo',
+            }.get(ast.value)
+            if ast.value == '-' and len(ast.children) == 1:
+                arithmetic_operator = 'multiply'
+
+            if arithmetic_operator in self.event_input_incompatible_operators:
+                for child in ast.children:
+                    for field_node in self._iter_field_nodes(child):
+                        field_name = field_node.value
+                        if self._is_event_input_field(field_name):
+                            errors.append(SyntaxError(
+                                'event_input_incompatible',
+                                f'Operator {arithmetic_operator} does not support event inputs (field: {field_name})',
+                                field_node.position,
+                                template,
+                                operator_name=arithmetic_operator,
+                                field_name=field_name,
+                                expected_type='NON_EVENT',
+                                actual_type='EVENT'
+                            ))
+
+            # Validate children after checking the arithmetic operation itself.
             for child in ast.children:
                 errors.extend(self._validate_ast(child, template))
         
