@@ -625,27 +625,66 @@ class TemplateGenerator:
         if not fields:
             return []
 
+        import os
         import sqlite3
         from ..storage.backtest_storage import BacktestStorage
 
         storage = BacktestStorage(self.db_path)
+
+        # Keep a one-time full database backup before removing classifications
+        # written by the old name/description heuristic.
+        backup_path = os.path.abspath(storage.db_path) + ".event_flags_pre_cleanup.bak"
+        if not os.path.exists(backup_path):
+            source = sqlite3.connect(storage.db_path, timeout=30)
+            backup = sqlite3.connect(backup_path)
+            try:
+                source.backup(backup)
+            finally:
+                backup.close()
+                source.close()
+
         with sqlite3.connect(storage.db_path, timeout=30) as conn:
             conn.execute("PRAGMA busy_timeout = 30000")
             records = conn.execute(
                 """
-                SELECT field_id, field_data
+                SELECT field_id, is_event_input, field_data
                 FROM field_types
                 WHERE region = ? AND delay = ?
                 """,
                 (region, delay),
             ).fetchall()
 
-        raw_metadata = {}
-        for field_id, raw in records:
-            try:
-                raw_metadata[field_id] = json.loads(raw) if raw else {}
-            except (TypeError, ValueError):
-                raw_metadata[field_id] = {}
+            raw_metadata = {}
+            legacy_ids = []
+            for field_id, stored_flag, raw in records:
+                try:
+                    metadata = json.loads(raw) if raw else {}
+                except (TypeError, ValueError):
+                    metadata = {}
+                raw_metadata[field_id] = metadata
+
+                explicit = metadata.get("is_event_input")
+                is_explicit = (
+                    isinstance(explicit, bool)
+                    or (isinstance(explicit, int) and explicit in (0, 1))
+                )
+                if not is_explicit and stored_flag is not None:
+                    legacy_ids.append((field_id, region, delay))
+
+            if legacy_ids:
+                conn.executemany(
+                    """
+                    UPDATE field_types
+                    SET is_event_input = NULL, updated_at = CURRENT_TIMESTAMP
+                    WHERE field_id = ? AND region = ? AND delay = ?
+                    """,
+                    legacy_ids,
+                )
+                logger.warning(
+                    "Cleared %s legacy heuristic event-input flags for %s delay=%s. "
+                    "Database backup: %s",
+                    len(legacy_ids), region, delay, backup_path
+                )
 
         def explicit_flag(value):
             if isinstance(value, bool):
