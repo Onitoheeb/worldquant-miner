@@ -1209,8 +1209,8 @@ FIXED EXPRESSION:"""
             error_message[:160],
         )
         operator_match = re.search(
-            r"(?:Operator\\s+)?([A-Za-z_][A-Za-z0-9_]*)\\s+"
-            r"(?:does\\s+not\\s+support|expects\\s+only)\\s+event\\s+inputs",
+            r"(?:Operator\s+)?([A-Za-z_][A-Za-z0-9_]*)\s+"
+            r"(?:does\s+not\s+support|expects\s+only)\s+event\s+inputs",
             error_message,
             re.IGNORECASE,
         )
