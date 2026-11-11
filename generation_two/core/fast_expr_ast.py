@@ -499,8 +499,16 @@ class FASTEXPRParser:
         for param in params:
             if not param:
                 return None
-            if param in {"...", ".."} or param.endswith("...") or param.endswith(".."):
+            if param in {"...", ".."}:
                 variadic = True
+                continue
+            if param.endswith("..."):
+                variadic = True
+                param = param[:-3].strip()
+            elif param.endswith(".."):
+                variadic = True
+                param = param[:-2].strip()
+            if not param:
                 continue
             maximum += 1
             if "=" not in param:
