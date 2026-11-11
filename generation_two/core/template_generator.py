@@ -615,10 +615,12 @@ class TemplateGenerator:
         region: str,
         delay: int
     ) -> List[Dict]:
-        """Attach persisted event-input flags to fields for the active region/delay.
+        """Attach only explicitly supplied event-input classifications.
 
-        Missing or NULL classifications are rejected rather than silently
-        treating an unknown field as a non-event input.
+        Historical rows may contain heuristic flags inferred from words such as
+        "event" in a field name or description. Those values are not authoritative.
+        If the original API field payload has no explicit is_event_input value,
+        leave the classification unknown and let BRAIN simulation decide.
         """
         if not fields:
             return []
@@ -631,41 +633,53 @@ class TemplateGenerator:
             conn.execute("PRAGMA busy_timeout = 30000")
             records = conn.execute(
                 """
-                SELECT field_id, is_event_input
+                SELECT field_id, field_data
                 FROM field_types
                 WHERE region = ? AND delay = ?
                 """,
                 (region, delay),
             ).fetchall()
 
-        classifications = {
-            field_id: is_event_input
-            for field_id, is_event_input in records
-        }
+        raw_metadata = {}
+        for field_id, raw in records:
+            try:
+                raw_metadata[field_id] = json.loads(raw) if raw else {}
+            except (TypeError, ValueError):
+                raw_metadata[field_id] = {}
 
-        missing = [
-            field.get("id", "")
-            for field in fields
-            if field.get("id") and (
-                field.get("id") not in classifications
-                or classifications[field.get("id")] is None
-            )
-        ]
-        if missing:
-            sample = ", ".join(missing[:10])
-            raise ValueError(
-                f"Missing explicit event-input classification for "
-                f"{len(missing)} {region} delay={delay} fields: {sample}. "
-                "Classify these fields in field_types before generating."
-            )
+        def explicit_flag(value):
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, int) and value in (0, 1):
+                return bool(value)
+            return None
 
         enriched_fields = []
+        unknown = []
         for field in fields:
             field_id = field.get("id", "")
             enriched = dict(field)
             if field_id:
-                enriched["is_event_input"] = bool(classifications[field_id])
+                # Prefer the live API payload. The stored payload is a fallback
+                # for callers that provide a reduced field object.
+                flag = explicit_flag(field.get("is_event_input"))
+                if flag is None:
+                    flag = explicit_flag(
+                        raw_metadata.get(field_id, {}).get("is_event_input")
+                    )
+                enriched["is_event_input"] = flag
+                if flag is None:
+                    unknown.append(field_id)
             enriched_fields.append(enriched)
+
+        if unknown:
+            logger.warning(
+                "Event-input status is unknown for %s %s delay=%s fields "
+                "(including %s). Legacy heuristic flags are ignored; local "
+                "event compatibility checks will be skipped for these fields "
+                "and BRAIN simulation remains authoritative.",
+                len(unknown), region, delay, ", ".join(unknown[:10])
+            )
 
         return enriched_fields
 
