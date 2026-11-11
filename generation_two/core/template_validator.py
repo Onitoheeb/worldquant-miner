@@ -1517,7 +1517,7 @@ FIXED EXPRESSION:"""
             # happens to have the same arity: nested calls may legitimately need
             # those arguments (for example, a time-series lookback).
             named_operator = re.search(
-                r'\\b(?:operator|function)\\s+["\\']?([a-z_][a-z0-9_]*)',
+                r'\b(?:operator|function)\s+["\']?([a-z_][a-z0-9_]*)',
                 error_message,
                 re.IGNORECASE,
             )
@@ -1610,32 +1610,6 @@ FIXED EXPRESSION:"""
             logger.warning("Skipping AI arity repair: no verified operator signature is available")
             return template, []
 
-        if False and not fixes and self.ollama_manager:
-            logger.info("🔧 Trying prompt engineering for input count fix...")
-            prompt = f"""Fix this FASTEXPR expression that has wrong number of operator parameters:
-
-ERROR: {error_message}
-EXPRESSION: {template}
-
-The operator has the wrong number of inputs. Fix it by:
-1. If it says "should be exactly 1 input(s)" but has 2, remove the extra parameter
-2. If it says "should be exactly 2 input(s)" but has 1, add a default parameter (like 1 or 0)
-3. Keep the operator name and first parameter, adjust others
-
-Return ONLY the fixed expression, no explanations:"""
-            
-            try:
-                response = self.ollama_manager.generate(prompt, max_tokens=300)
-                if response:
-                    fixed = self._extract_expression_from_response(response)
-                    if fixed and fixed != template:
-                        fixed_template = fixed
-                        fixes.append("Prompt engineering fix for input count")
-                        logger.info(f"🔧 Prompt engineering fixed input count: {fixed[:50]}...")
-            except Exception as e:
-                logger.debug(f"Prompt engineering for input count failed: {e}")
-                # fixed_template already set to template at the beginning, so no need to set it again
-        
         return fixed_template, fixes
     
     def get_validation_stats(self) -> Dict:
