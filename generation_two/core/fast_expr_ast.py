@@ -456,6 +456,83 @@ class FASTEXPRParser:
         
         return args
     
+    @staticmethod
+    def _operator_arity_from_definition(operator: Dict) -> Optional[Tuple[int, Optional[int]]]:
+        """Extract required and maximum positional arity from operator catalogue metadata.
+
+        Returns None when the catalogue definition is not a simple function signature;
+        unknown signatures are deliberately not guessed.
+        """
+        name = str(operator.get("name", "")).strip()
+        definition = str(operator.get("definition", "")).strip()
+        match = re.match(r"^([a-zA-Z_][a-zA-Z0-9_]*)\\s*\\((.*)\\)", definition)
+        if not match or match.group(1) != name:
+            return None
+
+        params_text = match.group(2).strip()
+        if not params_text:
+            return (0, 0)
+
+        params = []
+        depth = 0
+        quote = None
+        start = 0
+        for index, char in enumerate(params_text):
+            if quote:
+                if char == quote and (index == 0 or params_text[index - 1] != "\\\\"):
+                    quote = None
+                continue
+            if char in ("'", '"'):
+                quote = char
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+            elif char == "," and depth == 0:
+                params.append(params_text[start:index].strip())
+                start = index + 1
+        params.append(params_text[start:].strip())
+
+        required = 0
+        maximum = 0
+        variadic = False
+        for param in params:
+            if not param:
+                return None
+            if param in {"...", ".."} or param.endswith("...") or param.endswith(".."):
+                variadic = True
+                continue
+            maximum += 1
+            if "=" not in param:
+                required += 1
+
+        return required, (None if variadic else maximum)
+
+    def _validate_operator_arity(self, operator_name: str, ast: ASTNode, template: str) -> List[SyntaxError]:
+        """Reject known operator calls whose argument count contradicts catalogue metadata."""
+        operator = self.operators.get(operator_name, {})
+        arity = self._operator_arity_from_definition(operator)
+        if arity is None:
+            return []
+
+        minimum, maximum = arity
+        actual = len(ast.children)
+        if actual < minimum or (maximum is not None and actual > maximum):
+            if maximum is None:
+                expected = f"at least {minimum}"
+            elif minimum == maximum:
+                expected = f"exactly {minimum}"
+            else:
+                expected = f"between {minimum} and {maximum}"
+            return [SyntaxError(
+                "invalid_operator_arguments",
+                f"Operator {operator_name} expects {expected} input(s), got {actual}",
+                ast.position,
+                template,
+                operator_name=operator_name
+            )]
+        return []
+
     def _is_explicit_grouping_field(self, field_name: str) -> bool:
         """Return True only when field metadata explicitly identifies a grouping field.
 
@@ -494,18 +571,12 @@ class FASTEXPRParser:
                     operator_name=operator_name
                 ))
             else:
-                # The current BRAIN Operators reference specifies kth_element(x, d, k).
-                # Reject calls missing either required lookback or k rather than
-                # allowing BRAIN to reject them later. The parser currently supports
-                # positional arguments here; named string arguments are not rewritten.
-                if operator_name == "kth_element" and len(ast.children) < 3:
-                    errors.append(SyntaxError(
-                        'invalid_operator_arguments',
-                        'kth_element requires x, d, and k (see Brain Operators reference)',
-                        ast.position,
-                        template,
-                        operator_name=operator_name
-                    ))
+                # Validate arity only when the operator catalogue provides a
+                # recognizable signature. Unknown signatures remain unchecked rather
+                # than being repaired or guessed.
+                arity_errors = self._validate_operator_arity(operator_name, ast, template)
+                if arity_errors:
+                    errors.extend(arity_errors)
                     return errors
 
                 # Operator scope identifies the BRAIN alpha type in which this
