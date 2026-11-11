@@ -166,6 +166,47 @@ class EventInputASTTests(unittest.TestCase):
         finally:
             os.unlink(db_path)
 
+    def test_database_loader_ignores_guessed_legacy_operator_rows(self):
+        import os
+        import tempfile
+        from generation_two.storage.backtest_storage import BacktestStorage
+
+        handle, db_path = tempfile.mkstemp(suffix=".sqlite")
+        os.close(handle)
+        try:
+            validator = TemplateValidator(
+                operators=[],
+                data_fields=[],
+                db_path=db_path,
+                use_ast=True,
+            )
+            storage = BacktestStorage(db_path)
+            storage.store_compiler_knowledge(
+                knowledge_type="event_input_incompatible",
+                operator_name="rank",
+                compatibility_status="incompatible",
+                error_message="Invalid input data for this expression",
+                learned_from_template="rank(event_field)",
+                metadata={"extracted_from_template": True},
+            )
+            storage.store_compiler_knowledge(
+                knowledge_type="event_input_incompatible",
+                operator_name="add",
+                compatibility_status="incompatible",
+                error_message="Operator add does not support event inputs",
+                learned_from_template="add(event_field, price)",
+                metadata={"evidence_source": "explicit_brain_error"},
+            )
+
+            validator.parser.event_input_incompatible_operators.clear()
+            loaded = validator.parser.load_event_input_knowledge_from_db(db_path)
+
+            self.assertEqual(loaded, 1)
+            self.assertIn("add", validator.parser.event_input_incompatible_operators)
+            self.assertNotIn("rank", validator.parser.event_input_incompatible_operators)
+        finally:
+            os.unlink(db_path)
+
     def test_event_repair_does_not_guess_ts_operator_replacement(self):
         validator = TemplateValidator(
             operators=[
