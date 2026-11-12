@@ -46,3 +46,21 @@ def test_stage5_platform_red_error_is_distinguished_from_warning():
         {"name": "UNIVERSE", "status": "ERROR"},
     ]
     assert tester._has_warnings_only(checks) is False
+
+
+
+def test_platform_warning_does_not_mean_simulation_failed():
+    from generation_two.core.simulator_tester import SimulatorTester
+
+    tester = SimulatorTester.__new__(SimulatorTester)
+    checks = [{"status": "WARNING", "message": "Review correlation"}]
+    assert tester._has_warnings_only(checks) is True
+    assert tester._has_red_errors(checks) is False
+
+
+def test_platform_error_is_a_hard_failure():
+    from generation_two.core.simulator_tester import SimulatorTester
+
+    tester = SimulatorTester.__new__(SimulatorTester)
+    checks = [{"status": "ERROR", "message": "Invalid settings"}]
+    assert tester._has_red_errors(checks) is True
