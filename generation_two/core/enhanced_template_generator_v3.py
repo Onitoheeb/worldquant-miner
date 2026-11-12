@@ -38,7 +38,8 @@ class EnhancedTemplateGeneratorV3:
         deepseek_api_key: str = None,
         db_path: str = "generation_two_backtests.db",
         ollama_url: str = "http://localhost:11434",
-        ollama_model: str = "qwen2.5-coder:1.5b"
+        ollama_model: str = "qwen2.5-coder:1.5b",
+        config_manager=None
     ):
         """
         Initialize Generation Two system
@@ -58,7 +59,8 @@ class EnhancedTemplateGeneratorV3:
             deepseek_api_key=deepseek_api_key,
             ollama_url=ollama_url,
             ollama_model=ollama_model,
-            db_path=db_path  # Pass database path to template generator
+            db_path=db_path,  # Pass database path to template generator
+            config_manager=config_manager
         )
         
         # Theme manager
