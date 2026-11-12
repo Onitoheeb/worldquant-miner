@@ -96,11 +96,16 @@ class SimulatorTester:
         self.template_generator = template_generator  # For re-authentication if needed
         self.executor = ThreadPoolExecutor(max_workers=8)
         self.active_simulations = {}  # {alpha_id: Future}
+        self._submission_state = threading.local()
         # BRAIN's concurrency limit is account-wide, not per GUI worker or tester.
         # A class-level semaphore serializes submissions across every SimulatorTester
         # instance created by Step 5 workers.
 
     
+    def get_last_submission_error(self) -> str:
+        """Return the current worker thread's most recent submission failure."""
+        return getattr(self._submission_state, "error", "")
+
     def submit_simulation(
         self, 
         template: str, 
@@ -119,6 +124,7 @@ class SimulatorTester:
             Progress URL if successful, None otherwise
         """
         permit_acquired = False
+        self._submission_state.error = ""
         try:
             import re
             from dataclasses import asdict
@@ -126,10 +132,9 @@ class SimulatorTester:
             # Final safety barrier: never send unresolved algorithmic placeholders to BRAIN.
             unresolved = re.findall(r'\b(?:OPERATOR|DATA_FIELD)\d+\b', template or '', re.IGNORECASE)
             if unresolved:
-                logger.error(
-                    "Rejecting simulation submission because unresolved placeholders remain: %s",
-                    unresolved
-                )
+                message = f"Unresolved placeholders remain: {unresolved}"
+                self._submission_state.error = message
+                logger.error("Rejecting simulation submission: %s", message)
                 return None
 
             # Require compiler validation at the API boundary as well. This protects
@@ -139,17 +144,19 @@ class SimulatorTester:
                 compile_result = validator.compile_template(template, optimize=False)
                 if not compile_result.success:
                     errors = [getattr(error, 'message', str(error)) for error in (compile_result.errors or [])]
-                    logger.error(
-                        "Rejecting simulation submission because FASTEXPR compilation failed: %s",
-                        errors[:3]
-                    )
+                    message = "FASTEXPR compilation failed: " + "; ".join(errors[:3])
+                    if not errors:
+                        message = "FASTEXPR compilation failed; compiler returned no diagnostic."
+                    self._submission_state.error = message
+                    logger.error("Rejecting simulation submission: %s", message)
                     return None
                 if compile_result.final_expression:
                     template = compile_result.final_expression
             
             region_config = self.region_configs.get(region)
             if not region_config:
-                logger.error(f"Unknown region: {region}")
+                self._submission_state.error = f"Unknown region: {region}"
+                logger.error(self._submission_state.error)
                 return None
             
             # Verify session has cookies before making request (for debugging)
@@ -225,7 +232,10 @@ class SimulatorTester:
             if response.status_code == 201:
                 progress_url = response.headers.get('Location')
                 if not progress_url:
-                    logger.error("No Location header in response")
+                    self._submission_state.error = (
+                        f"BRAIN returned HTTP 201 without a Location header; body={response.text[:500]!r}"
+                    )
+                    logger.error(self._submission_state.error)
                     type(self)._submission_semaphore.release()
                     permit_acquired = False
                     return None
@@ -234,19 +244,23 @@ class SimulatorTester:
                 permit_acquired = False
                 return progress_url
             elif response.status_code == 401:
-                logger.error(f"Authentication expired - session cookies may have been lost")
-                logger.error(f"Response: {response.text}")
+                self._submission_state.error = f"Authentication expired (HTTP 401): {response.text[:500]}"
+                logger.error(self._submission_state.error)
                 self._submission_semaphore.release()
                 permit_acquired = False
                 return None
             else:
-                logger.error(f"Failed to submit simulation: {response.status_code} - {response.text}")
+                self._submission_state.error = (
+                    f"BRAIN rejected submission (HTTP {response.status_code}): {response.text[:1000]}"
+                )
+                logger.error(self._submission_state.error)
                 self._submission_semaphore.release()
                 permit_acquired = False
                 return None
                 
         except Exception as e:
-            logger.error(f"Error submitting simulation: {e}")
+            self._submission_state.error = f"Submission exception: {type(e).__name__}: {e}"
+            logger.error(f"Error submitting simulation: {e}", exc_info=True)
             # A failed POST never transfers the permit to a monitor.
             if permit_acquired:
                 self._submission_semaphore.release()
@@ -481,11 +495,13 @@ class SimulatorTester:
                         
                         # Check for warnings (v2 style: mark warnings as red if no red errors)
                         has_warnings = self._has_warnings_only(checks_data)
-                        # If there are warnings but no red errors, mark as failed (red) like v2
-                        is_success = not has_warnings
+                        # A returned alpha ID plus HTTP 200 alpha details means the
+                        # simulation completed. Platform warnings are review/qualification
+                        # signals; they must not be misreported as a failed simulation.
+                        is_success = True
                         warning_message = ""
                         if has_warnings:
-                            warning_message = "Alpha has warnings (marked as red per v2 behavior)"
+                            warning_message = "Platform warnings require review; simulation completed."
                         
                         return SimulationResult(
                             template=template,
