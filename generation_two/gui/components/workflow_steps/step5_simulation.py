@@ -595,7 +595,11 @@ class Step5Simulation:
                                 alpha_id = ''
                             else:
                                 alpha_id = str(alpha_id)
-                            metric_pass = _meets_research_metric_gates(result)
+                            platform_review_required = bool(result.error_message)
+                            metric_pass = (
+                                _meets_research_metric_gates(result)
+                                and not platform_review_required
+                            )
                             result_dict = {
                                 'alpha_id': alpha_id,
                                 'returns': result.returns,
@@ -607,8 +611,14 @@ class Step5Simulation:
                                 'correlation_review': 'PENDING'
                             }
                             self.slot_manager.release_slots(slot_ids, success=True, result=result_dict)
-                            display_status = "METRIC_PASS" if metric_pass else "COMPLETED_LOW_QUALITY"
+                            display_status = (
+                                "REVIEW_REQUIRED" if platform_review_required
+                                else "METRIC_PASS" if metric_pass
+                                else "COMPLETED_LOW_QUALITY"
+                            )
                             display_message = (
+                                "Simulation completed; platform checks require review"
+                                if platform_review_required else
                                 "Metric gates passed; correlation review pending"
                                 if metric_pass else
                                 "Simulation completed; below research metric gates"
@@ -617,19 +627,23 @@ class Step5Simulation:
                                 primary_slot_id, display_status, template[:40] + "...",
                                 f"Alpha: {alpha_id}",
                                 [
-                                    "METRIC GATES PASSED" if metric_pass else "COMPLETED, NOT QUALIFIED",
+                                    "PLATFORM CHECKS REQUIRE REVIEW" if platform_review_required
+                                    else "METRIC GATES PASSED" if metric_pass
+                                    else "COMPLETED, NOT QUALIFIED",
                                     f"Sharpe: {result.sharpe:.4f}",
                                     f"Fitness: {result.fitness:.4f}",
                                     f"Turnover: {result.turnover:.4f}",
                                     "Correlation review: PENDING"
                                 ]
                             )
-                            if metric_pass:
+                            if platform_review_required:
+                                self._log_to_slot(primary_slot_id, f"🟠 SIMULATION COMPLETED; PLATFORM REVIEW REQUIRED - Alpha ID: {alpha_id}; {result.error_message}")
+                            elif metric_pass:
                                 self._log_to_slot(primary_slot_id, f"🟢 METRIC GATES PASSED - Alpha ID: {alpha_id}")
                             else:
                                 self._log_to_slot(primary_slot_id, f"⚪ Simulation completed but failed metric gates - Alpha ID: {alpha_id}")
                             self._log_result(
-                                f"{'🟢 METRIC PASS' if metric_pass else '⚪ COMPLETED, NOT QUALIFIED'} "
+                                f"{'🟠 REVIEW REQUIRED' if platform_review_required else '🟢 METRIC PASS' if metric_pass else '⚪ COMPLETED, NOT QUALIFIED'} "
                                 f"[{template_index+1}] Alpha: {alpha_id}, Sharpe: {result.sharpe:.4f}, "
                                 f"Fitness: {result.fitness:.4f}, Turnover: {result.turnover:.4f}; "
                                 f"correlation review pending\n"
