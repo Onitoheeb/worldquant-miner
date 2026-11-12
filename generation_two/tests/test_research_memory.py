@@ -65,6 +65,29 @@ class ResearchMemoryTests(unittest.TestCase):
         self.assertIn("unknown_operator(close)", context)
         self.assertIn("Unknown operator", context)
 
+    def test_only_metric_qualified_experiments_are_used_as_research_seeds(self):
+        self.memory.record_result({
+            "alpha_id": "weak-alpha",
+            "template": "rank(close)",
+            "region": "USA",
+            "success": True,
+            "sharpe": 1.2,
+            "fitness": 0.8,
+            "turnover": 0.10,
+            "timestamp": 300.0,
+        })
+        self.memory.record_result({
+            "alpha_id": "high-turnover-alpha",
+            "template": "ts_rank(volume, 20)",
+            "region": "USA",
+            "success": True,
+            "sharpe": 2.1,
+            "fitness": 1.3,
+            "turnover": 0.45,
+            "timestamp": 301.0,
+        })
+        self.assertEqual(self.memory.get_diverse_top_results("USA"), [])
+
     def test_same_alpha_is_updated_instead_of_duplicated(self):
         result = {
             "alpha_id": "alpha-2",
