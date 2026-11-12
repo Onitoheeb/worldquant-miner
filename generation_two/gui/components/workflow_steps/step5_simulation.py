@@ -15,6 +15,21 @@ from ...theme import COLORS, FONTS, STYLES
 logger = logging.getLogger(__name__)
 
 
+def _meets_research_metric_gates(result) -> bool:
+    """Return whether a completed alpha meets the minimum research metric gates."""
+    if not result or not getattr(result, "success", False) or not getattr(result, "alpha_id", ""):
+        return False
+    try:
+        sharpe = float(getattr(result, "sharpe", 0.0) or 0.0)
+        fitness = float(getattr(result, "fitness", 0.0) or 0.0)
+        turnover = float(getattr(result, "turnover", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return False
+    if 0.0 <= turnover <= 1.0:
+        turnover *= 100.0
+    return sharpe >= 1.5 and fitness >= 1.0 and turnover <= 30.0
+
+
 class Step5Simulation:
     """Step 5: Simulation & Testing"""
     
@@ -580,20 +595,45 @@ class Step5Simulation:
                                 alpha_id = ''
                             else:
                                 alpha_id = str(alpha_id)
+                            metric_pass = _meets_research_metric_gates(result)
                             result_dict = {
                                 'alpha_id': alpha_id,
                                 'returns': result.returns,
                                 'sharpe': result.sharpe,
+                                'fitness': result.fitness,
                                 'turnover': result.turnover,
-                                'max_drawdown': result.max_drawdown
+                                'max_drawdown': result.max_drawdown,
+                                'metric_gate_pass': metric_pass,
+                                'correlation_review': 'PENDING'
                             }
                             self.slot_manager.release_slots(slot_ids, success=True, result=result_dict)
-                            self._update_slot_display(primary_slot_id, "COMPLETED", template[:40] + "...", 
-                                                     f"✅ Alpha: {alpha_id}", 
-                                                     [f"✅ SUCCESS", f"Returns: {result.returns:.4f}", f"Sharpe: {result.sharpe:.4f}"])
-                            self._log_to_slot(primary_slot_id, f"✅ SUCCESS - Alpha ID: {alpha_id}")
-                            self._log_to_slot(primary_slot_id, f"   Returns: {result.returns:.4f}, Sharpe: {result.sharpe:.4f}")
-                            self._log_result(f"✅ [{template_index+1}] SUCCESS - Alpha: {alpha_id}, Returns: {result.returns:.4f}, Sharpe: {result.sharpe:.4f}\n")
+                            display_status = "METRIC_PASS" if metric_pass else "COMPLETED_LOW_QUALITY"
+                            display_message = (
+                                "Metric gates passed; correlation review pending"
+                                if metric_pass else
+                                "Simulation completed; below research metric gates"
+                            )
+                            self._update_slot_display(
+                                primary_slot_id, display_status, template[:40] + "...",
+                                f"Alpha: {alpha_id}",
+                                [
+                                    "METRIC GATES PASSED" if metric_pass else "COMPLETED, NOT QUALIFIED",
+                                    f"Sharpe: {result.sharpe:.4f}",
+                                    f"Fitness: {result.fitness:.4f}",
+                                    f"Turnover: {result.turnover:.4f}",
+                                    "Correlation review: PENDING"
+                                ]
+                            )
+                            if metric_pass:
+                                self._log_to_slot(primary_slot_id, f"🟢 METRIC GATES PASSED - Alpha ID: {alpha_id}")
+                            else:
+                                self._log_to_slot(primary_slot_id, f"⚪ Simulation completed but failed metric gates - Alpha ID: {alpha_id}")
+                            self._log_result(
+                                f"{'🟢 METRIC PASS' if metric_pass else '⚪ COMPLETED, NOT QUALIFIED'} "
+                                f"[{template_index+1}] Alpha: {alpha_id}, Sharpe: {result.sharpe:.4f}, "
+                                f"Fitness: {result.fitness:.4f}, Turnover: {result.turnover:.4f}; "
+                                f"correlation review pending\n"
+                            )
                         else:
                             # V2-style refeed: Try to fix and retry
                             error_msg = result.error_message or "Unknown error"
