@@ -301,7 +301,17 @@ class MiningEngine:
         
         if not selected_templates:
             return
-        
+
+        # Avoid selecting the same unsimulated DB row more than once in this batch.
+        unique_templates = []
+        seen_in_batch = set()
+        for template, region in selected_templates:
+            key = (template, region)
+            if key not in seen_in_batch:
+                seen_in_batch.add(key)
+                unique_templates.append((template, region))
+        selected_templates = unique_templates
+
         # Select low-correlation templates from selected batch
         if len(selected_templates) > 1:
             low_corr_templates = self.correlation_tracker.get_low_correlation_templates(
@@ -322,25 +332,14 @@ class MiningEngine:
                 self._log("⚠️ Daily simulation limit reached")
                 break
             
-            # Assign slot (GLB uses 2 slots)
-            slot_count = 2 if region == 'GLB' else 1
-            slot_ids = self.slot_manager.find_available_slots(slot_count)
-            
-            if not slot_ids:
-                # Wait for slots
-                wait_count = 0
-                while wait_count < 10 and not self.stop_flag:
-                    time.sleep(2)
-                    wait_count += 1
-                    slot_ids = self.slot_manager.find_available_slots(slot_count)
-                    if slot_ids:
-                        break
-                
-                if not slot_ids:
-                    self._log(f"⚠️ No slots available for {region}")
-                    continue
-            
-            # Assign slots
+            # Reserve slots atomically. If none fit (for example, a GLB job
+            # needs two adjacent slots), leave the remaining work for the next loop.
+            assigned_slots = self.slot_manager.assign_slot(template, region, 0)
+            if not assigned_slots:
+                self._log(f"⏳ No available slot block for {region}; retrying on next cycle")
+                break
+
+            # Start one worker per expression, not one worker per visual slot.
             assigned_slots = self.slot_manager.assign_slot(template, region, 0)
             if not assigned_slots:
                 continue
