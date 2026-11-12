@@ -116,6 +116,10 @@ class Step6Mining:
         
         # Start mining engine
         self.mining_engine.start()
+        self.ui.mining_status_label.config(
+            text="Status: Running",
+            fg=COLORS['accent_green']
+        )
         
         # Start slot update thread
         self._start_slot_update_thread()
