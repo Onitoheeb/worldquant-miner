@@ -445,7 +445,7 @@ class MiningEngine:
                                     slot = self.slot_manager.get_slot_status(slot_id)
                                     if slot:
                                         slot.add_log("❌ Retry replacement failed, skipping submission")
-                                    self.slot_manager.release_slot(slot_id, success=False, error="Placeholder replacement failed")
+                                    self.slot_manager.release_slots(slot_ids, success=False, error="Placeholder replacement failed")
                                     return
                             else:
                                 slot = self.slot_manager.get_slot_status(slot_id)
@@ -472,7 +472,7 @@ class MiningEngine:
                                 slot = self.slot_manager.get_slot_status(slot_id)
                                 if slot:
                                     slot.add_log(f"❌ FAILED: Fallback replacement incomplete. Remaining: {remaining_ops + remaining_fields}")
-                                self.slot_manager.release_slot(slot_id, success=False, error=f"Placeholders not replaced: {remaining_ops + remaining_fields}")
+                                self.slot_manager.release_slots(slot_ids, success=False, error=f"Placeholders not replaced: {remaining_ops + remaining_fields}")
                                 return
                     else:
                         # Fallback to old method
@@ -492,7 +492,7 @@ class MiningEngine:
                             slot = self.slot_manager.get_slot_status(slot_id)
                             if slot:
                                 slot.add_log(f"❌ FAILED: Fallback replacement incomplete. Remaining: {remaining_ops + remaining_fields}")
-                            self.slot_manager.release_slot(slot_id, success=False, error=f"Placeholders not replaced: {remaining_ops + remaining_fields}")
+                            self.slot_manager.release_slots(slot_ids, success=False, error=f"Placeholders not replaced: {remaining_ops + remaining_fields}")
                             return
             
             settings = SimulationSettings(
@@ -514,7 +514,7 @@ class MiningEngine:
                     slot.add_log(f"   Remaining operators: {remaining_ops}")
                     slot.add_log(f"   Remaining fields: {remaining_fields}")
                     slot.add_log(f"   Template: {template[:100]}...")
-                self.slot_manager.release_slot(slot_id, success=False, error=f"Cannot submit: placeholders remain ({remaining_ops + remaining_fields})")
+                self.slot_manager.release_slots(slot_ids, success=False, error=f"Cannot submit: placeholders remain ({remaining_ops + remaining_fields})")
                 slot = self.slot_manager.get_slot_status(slot_id)
                 if slot:
                     slot.add_log("❌ Skipping submission - template has unreplaced placeholders")
@@ -530,7 +530,7 @@ class MiningEngine:
             # Submit
             progress_url = self.simulator_tester.submit_simulation(template, region, settings)
             if not progress_url:
-                self.slot_manager.release_slot(slot_id, success=False, error="Failed to submit")
+                self.slot_manager.release_slots(slot_ids, success=False, error="Failed to submit")
                 return
 
             self._record_accepted_submission()
@@ -554,7 +554,7 @@ class MiningEngine:
             
             # Check if result is None (simulation failed completely)
             if result is None:
-                self.slot_manager.release_slot(slot_id, success=False, error="Simulation failed")
+                self.slot_manager.release_slots(slot_ids, success=False, error="Simulation failed")
                 self._update_slot(slot_id, template, region, 0, "Simulation failed", "FAILED")
                 self._log(f"❌ {region}: Simulation failed (no result)")
                 return
@@ -569,8 +569,7 @@ class MiningEngine:
                 self.search_strategy.add_successful_template(template, region)
             
             # Release slot
-            self.slot_manager.release_slot(
-                slot_id,
+            self.slot_manager.release_slots(slot_ids,
                 success=result.success,
                 result={
                     'sharpe': result.sharpe,
@@ -594,7 +593,7 @@ class MiningEngine:
                 
         except Exception as e:
             logger.error(f"Simulation error: {e}", exc_info=True)
-            self.slot_manager.release_slot(slot_id, success=False, error=str(e))
+            self.slot_manager.release_slots(slot_ids, success=False, error=str(e))
             self._update_slot(slot_id, template, region, 0, str(e)[:30], "FAILED")
     
     def _handle_refeed(self, slot_id: int, template: str, region: str, error_message: str, settings: SimulationSettings):
