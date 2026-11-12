@@ -161,6 +161,12 @@ class MiningEngine:
             # Generate placeholder template algorithmically
             generator = AlgorithmicTemplateGenerator(available_operators, available_fields)
             
+            # Read existing templates once per generation attempt. The previous
+            # implementation repeated this database query for every retry.
+            existing_templates = set(
+                self.backtest_storage.get_all_templates(region=region, limit=1000)
+            ) if self.backtest_storage else set()
+
             # Try up to 10 times to generate a template different from database
             max_retries = 10
             for retry in range(max_retries):
@@ -174,7 +180,6 @@ class MiningEngine:
                 
                 # Check if different from database
                 if self.backtest_storage:
-                    existing_templates = self.backtest_storage.get_all_templates(region=region, limit=1000)
                     if template_with_placeholders not in existing_templates:
                         # Check duplicates
                         is_dup, reason = self.duplicate_detector.is_duplicate(template_with_placeholders, region)
