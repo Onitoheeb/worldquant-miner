@@ -379,6 +379,7 @@ class MiningEngine:
 
     def _run_simulation(self, slot_ids, template: str, region: str):
         """Run one BRAIN simulation and release all slots reserved for it."""
+        slot_ids = list(slot_ids) if isinstance(slot_ids, (list, tuple)) else [slot_ids]
         slot_id = slot_ids[0]
         try:
             # Replace placeholders using Ollama selection (like Step 5)
