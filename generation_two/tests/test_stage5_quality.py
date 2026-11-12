@@ -24,3 +24,25 @@ def test_stage5_rejects_missing_alpha_id():
         success=True, alpha_id="", sharpe=2.5, fitness=1.4, turnover=10.0
     )
     assert not _meets_research_metric_gates(result)
+
+
+
+def test_stage5_platform_warning_is_not_a_submission_failure():
+    from generation_two.core.simulator_tester import SimulatorTester
+
+    tester = SimulatorTester.__new__(SimulatorTester)
+    checks = [
+        {"name": "SELF_CORRELATION", "status": "WARNING", "message": "Review correlation"}
+    ]
+    assert tester._has_warnings_only(checks) is True
+
+
+def test_stage5_platform_red_error_is_distinguished_from_warning():
+    from generation_two.core.simulator_tester import SimulatorTester
+
+    tester = SimulatorTester.__new__(SimulatorTester)
+    checks = [
+        {"name": "SELF_CORRELATION", "status": "WARNING"},
+        {"name": "UNIVERSE", "status": "ERROR"},
+    ]
+    assert tester._has_warnings_only(checks) is False
