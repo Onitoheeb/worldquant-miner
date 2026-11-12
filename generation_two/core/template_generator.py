@@ -401,8 +401,17 @@ class TemplateGenerator:
         )
         use_ollama = bool(generation_config.get("use_ollama", use_ollama)) and use_ollama
         fallback_enabled = bool(generation_config.get("fallback_enabled", True))
+        ollama_priority = bool(generation_config.get("ollama_priority", True))
         temperature = float(generation_config.get("temperature", 0.7))
         max_tokens = int(generation_config.get("max_tokens", 500))
+
+        # When Ollama is not preferred, give the configured remote provider first
+        # opportunity. If it is unavailable or fails, the Ollama path below remains
+        # available as the secondary provider.
+        if use_ollama and not ollama_priority and fallback_enabled and self.deepseek_api_key:
+            preferred_fallback = self._generate_with_deepseek(prompt, region, dataset_categories)
+            if preferred_fallback:
+                return preferred_fallback
 
         # Feed measured BRAIN outcomes back into every research/generation cycle.
         research_context = self.research_memory.build_research_context(region)
