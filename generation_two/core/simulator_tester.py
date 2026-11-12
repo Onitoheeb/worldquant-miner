@@ -6,6 +6,7 @@ Handles simulation submission and monitoring
 import logging
 import requests
 import time
+import threading
 from typing import Dict, Optional, List, Callable
 from dataclasses import dataclass
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -73,10 +74,13 @@ class SimulationResult:
 
 class SimulatorTester:
     """
-    Handles simulation submission and monitoring
-    
-    Separated from template generation for modularity.
+    Handles simulation submission and monitoring.
+
+    The submission semaphore is shared across instances because BRAIN applies
+    its concurrent-simulation limit to the account, not to an individual worker.
     """
+
+    _submission_semaphore = threading.BoundedSemaphore(value=1)
     
     def __init__(self, session: requests.Session, region_configs: Dict, template_generator=None):
         """
@@ -92,6 +96,10 @@ class SimulatorTester:
         self.template_generator = template_generator  # For re-authentication if needed
         self.executor = ThreadPoolExecutor(max_workers=8)
         self.active_simulations = {}  # {alpha_id: Future}
+        # BRAIN's concurrency limit is account-wide, not per GUI worker or tester.
+        # A class-level semaphore serializes submissions across every SimulatorTester
+        # instance created by Step 5 workers.
+
     
     def submit_simulation(
         self, 
@@ -110,8 +118,34 @@ class SimulatorTester:
         Returns:
             Progress URL if successful, None otherwise
         """
+        permit_acquired = False
         try:
+            import re
             from dataclasses import asdict
+
+            # Final safety barrier: never send unresolved algorithmic placeholders to BRAIN.
+            unresolved = re.findall(r'\b(?:OPERATOR|DATA_FIELD)\d+\b', template or '', re.IGNORECASE)
+            if unresolved:
+                logger.error(
+                    "Rejecting simulation submission because unresolved placeholders remain: %s",
+                    unresolved
+                )
+                return None
+
+            # Require compiler validation at the API boundary as well. This protects
+            # retries and any caller that bypasses the Step 5 GUI validation path.
+            validator = getattr(self.template_generator, 'template_validator', None)
+            if validator and getattr(validator, 'use_ast', False):
+                compile_result = validator.compile_template(template, optimize=False)
+                if not compile_result.success:
+                    errors = [getattr(error, 'message', str(error)) for error in (compile_result.errors or [])]
+                    logger.error(
+                        "Rejecting simulation submission because FASTEXPR compilation failed: %s",
+                        errors[:3]
+                    )
+                    return None
+                if compile_result.final_expression:
+                    template = compile_result.final_expression
             
             region_config = self.region_configs.get(region)
             if not region_config:
@@ -159,44 +193,92 @@ class SimulatorTester:
                 'regular': template
             }
             
-            # Use make_api_request if available, otherwise use session directly
-            if self.template_generator and hasattr(self.template_generator, 'make_api_request'):
-                response = self.template_generator.make_api_request(
-                    'POST',
-                    'https://api.worldquantbrain.com/simulations',
-                    json=simulation_data
-                )
-            else:
-                # Fallback to direct session usage (maintains backward compatibility)
-                response = self.sess.post(
-                    'https://api.worldquantbrain.com/simulations',
-                    json=simulation_data
-                )
-            
+            # Serialize submissions and keep the permit until the corresponding
+            # monitor_simulation call finishes. This prevents concurrent POST bursts.
+            type(self)._submission_semaphore.acquire()
+            permit_acquired = True
+            # Retry only explicit concurrency-limit rejections. A 429 response
+            # means this POST was rejected, so retrying cannot create a duplicate alpha.
+            response = None
+            for attempt in range(6):
+                if self.template_generator and hasattr(self.template_generator, 'make_api_request'):
+                    response = self.template_generator.make_api_request(
+                        'POST',
+                        'https://api.worldquantbrain.com/simulations',
+                        json=simulation_data
+                    )
+                else:
+                    response = self.sess.post(
+                        'https://api.worldquantbrain.com/simulations',
+                        json=simulation_data
+                    )
+                if response.status_code != 429 or "CONCURRENT_SIMULATION_LIMIT_EXCEEDED" not in (response.text or ""):
+                    break
+                if attempt < 5:
+                    wait_seconds = min(30, 5 * (attempt + 1))
+                    logger.warning(
+                        "BRAIN concurrent simulation limit reached; retrying in %ss (%s/5)",
+                        wait_seconds, attempt + 1
+                    )
+                    time.sleep(wait_seconds)
+
             if response.status_code == 201:
                 progress_url = response.headers.get('Location')
                 if not progress_url:
                     logger.error("No Location header in response")
+                    type(self)._submission_semaphore.release()
+                    permit_acquired = False
                     return None
                 logger.info(f"Submitted simulation: {progress_url} for region {region}")
+                # The monitor wrapper now owns responsibility for releasing it.
+                permit_acquired = False
                 return progress_url
             elif response.status_code == 401:
                 logger.error(f"Authentication expired - session cookies may have been lost")
                 logger.error(f"Response: {response.text}")
+                self._submission_semaphore.release()
+                permit_acquired = False
                 return None
             else:
                 logger.error(f"Failed to submit simulation: {response.status_code} - {response.text}")
+                self._submission_semaphore.release()
+                permit_acquired = False
                 return None
                 
         except Exception as e:
             logger.error(f"Error submitting simulation: {e}")
+            # A failed POST never transfers the permit to a monitor.
+            if permit_acquired:
+                self._submission_semaphore.release()
             return None
     
     def monitor_simulation(
-        self, 
-        progress_url: str, 
-        template: str, 
-        region: str, 
+        self,
+        progress_url: str,
+        template: str,
+        region: str,
+        settings: SimulationSettings,
+        max_wait_time: int = 300,
+        progress_callback: Optional[Callable[[float, str, str], None]] = None
+    ) -> SimulationResult:
+        """Monitor a submitted simulation and always release its concurrency permit."""
+        try:
+            return self._monitor_simulation_impl(
+                progress_url, template, region, settings,
+                max_wait_time=max_wait_time,
+                progress_callback=progress_callback
+            )
+        finally:
+            try:
+                self._submission_semaphore.release()
+            except ValueError:
+                logger.warning("Simulation concurrency permit was already released")
+
+    def _monitor_simulation_impl(
+        self,
+        progress_url: str,
+        template: str,
+        region: str,
         settings: SimulationSettings,
         max_wait_time: int = 300,
         progress_callback: Optional[Callable[[float, str, str], None]] = None
@@ -267,20 +349,34 @@ class SimulatorTester:
                     continue
                 
                 data = response.json()
-                status = data.get('status', 'UNKNOWN')
-                
-                # Calculate elapsed time once
+                status = str(data.get('status', 'UNKNOWN')).upper()
+
+                # BRAIN commonly reports progress as a fraction and signals completion
+                # by returning an alpha ID, rather than a textual status field.
                 elapsed = time.time() - start_time
-                
-                # Handle empty or missing status - treat as PENDING if just submitted
-                if status == 'UNKNOWN' or not status:
-                    # If we just started monitoring (elapsed < 10s), treat as PENDING
-                    if elapsed < 10:
+                raw_progress = data.get('progress')
+                api_progress = None
+                if isinstance(raw_progress, (int, float)):
+                    api_progress = float(raw_progress)
+                    if 0.0 <= api_progress <= 1.0:
+                        api_progress *= 100.0
+                    api_progress = max(0.0, min(100.0, api_progress))
+
+                if data.get('alpha'):
+                    status = 'COMPLETE'
+                elif status in ('UNKNOWN', ''):
+                    if api_progress is not None:
+                        status = 'RUNNING' if api_progress > 0 else 'PENDING'
+                        logger.debug(
+                            f"Simulation API progress={raw_progress!r}; interpreted status={status}"
+                        )
+                    elif elapsed < 10:
                         status = 'PENDING'
-                        logger.debug(f"Status missing/unknown in API response, treating as PENDING (elapsed: {elapsed:.1f}s)")
+                        logger.debug(
+                            f"Status missing in early simulation response; treating as PENDING (elapsed: {elapsed:.1f}s)"
+                        )
                     else:
-                        # Log the actual response for debugging
-                        logger.warning(f"Unknown status in API response: {data}")
+                        logger.warning(f"Simulation response has no status/progress/alpha: {data}")
                 
                 # Calculate progress based on status and elapsed time
                 if status == 'COMPLETE':
@@ -294,12 +390,14 @@ class SimulatorTester:
                     progress_percent = min(15.0, (elapsed / max_wait_time) * 15)
                     progress_msg = f"⏳ Simulation pending... ({int(elapsed)}s)"
                 elif status == 'RUNNING' or status == 'IN_PROGRESS' or status == 'PROCESSING':
-                    # Estimate progress: assume simulations take 30-120 seconds typically
-                    # Use elapsed time as rough estimate, but show more granular progress
-                    base_progress = 15.0  # Start at 15% after submission
-                    time_based_progress = min(85.0, (elapsed / max_wait_time) * 70)  # Use 70% of range for time-based
-                    progress_percent = min(95.0, base_progress + time_based_progress)
-                    progress_msg = f"🔄 Simulation running... ({int(elapsed)}s elapsed)"
+                    # Prefer the API's actual progress value when present; otherwise estimate.
+                    if api_progress is not None:
+                        progress_percent = min(99.0, api_progress)
+                    else:
+                        base_progress = 15.0
+                        time_based_progress = min(85.0, (elapsed / max_wait_time) * 70)
+                        progress_percent = min(95.0, base_progress + time_based_progress)
+                    progress_msg = f"🔄 Simulation running... {progress_percent:.0f}% ({int(elapsed)}s elapsed)"
                 else:
                     # Unknown status, estimate based on time
                     # Log it for debugging but treat as PENDING if early, RUNNING if later
@@ -345,12 +443,10 @@ class SimulatorTester:
                             timestamp=time.time()
                         )
                     
-                    # Learn from simulation error if template_generator has validator
-                    if self.template_generator and hasattr(self.template_generator, 'template_validator'):
-                        validator = self.template_generator.template_validator
-                        if validator:
-                            validator.learn_from_simulation_error(template, "No alpha ID in response")
-                    
+                    # Do not record a successful alpha-ID extraction as a simulation error.
+                    # The previous implementation incorrectly taught the validator that every
+                    # completed simulation had "No alpha ID in response" before fetching alpha details.
+
                     # Get alpha details from the alpha endpoint
                     if self.template_generator and hasattr(self.template_generator, 'make_api_request'):
                         alpha_response = self.template_generator.make_api_request(

@@ -15,6 +15,21 @@ from ...theme import COLORS, FONTS, STYLES
 logger = logging.getLogger(__name__)
 
 
+def _meets_research_metric_gates(result) -> bool:
+    """Return whether a completed alpha meets the minimum research metric gates."""
+    if not result or not getattr(result, "success", False) or not getattr(result, "alpha_id", ""):
+        return False
+    try:
+        sharpe = float(getattr(result, "sharpe", 0.0) or 0.0)
+        fitness = float(getattr(result, "fitness", 0.0) or 0.0)
+        turnover = float(getattr(result, "turnover", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return False
+    if 0.0 <= turnover <= 1.0:
+        turnover *= 100.0
+    return sharpe >= 1.5 and fitness >= 1.0 and turnover <= 30.0
+
+
 class Step5Simulation:
     """Step 5: Simulation & Testing"""
     
@@ -468,45 +483,37 @@ class Step5Simulation:
                                                 self._log_to_slot(primary_slot_id, f"❌ FAILED: Still has placeholders after retry: {remaining_ops + remaining_fields}")
                                                 self._log_to_slot(primary_slot_id, f"❌ Skipping submission - template: {template[:100]}...")
                                                 # Mark as failed and skip submission
-                                                self.slot_manager.update_slot_status(slot_ids, "FAILED", f"Placeholders not replaced: {remaining_ops + remaining_fields}")
+                                                self.slot_manager.release_slots(slot_ids, success=False, error=f"Placeholders not replaced: {remaining_ops + remaining_fields}")
                                                 return
                                             else:
                                                 self._log_to_slot(primary_slot_id, "✅ All placeholders replaced after retry")
                                         else:
                                             self._log_to_slot(primary_slot_id, "❌ Retry replacement failed, skipping submission")
-                                            self.slot_manager.update_slot_status(slot_ids, "FAILED", "Placeholder replacement failed")
+                                            self.slot_manager.release_slots(slot_ids, success=False, error="Placeholder replacement failed")
                                             return
                                     else:
                                         self._log_to_slot(primary_slot_id, "✅ Ollama selection completed, all placeholders replaced")
                                 else:
-                                    self._log_to_slot(primary_slot_id, "⚠️ Ollama selection failed, using fallback replacement")
-                                    # Fallback to old method
+                                    self._log_to_slot(primary_slot_id, "❌ Ollama selection failed; rejecting this candidate without fallback substitution")
+                                    # Strict mode: do not use independent placeholder fallback
                                     if has_operator_placeholders:
-                                        template = self.workflow.generator.template_generator._replace_operator_placeholders(
-                                            template, available_operators
-                                        )
+                                        pass  # Strict mode: never substitute an independent random operator/field list
                                     if has_field_placeholders:
-                                        template = self.workflow.generator.template_generator._replace_field_placeholders(
-                                            template, available_fields, template_region
-                                        )
+                                        pass  # Strict mode: never substitute an independent random operator/field list
                                     # Verify fallback worked
                                     import re
                                     remaining_ops = re.findall(r'\b(OPERATOR\d+|operator\d+|Operator\d+)\b', template, re.IGNORECASE)
                                     remaining_fields = re.findall(r'\b(DATA_FIELD\d+|data_field\d+|Data_Field\d+)\b', template, re.IGNORECASE)
                                     if remaining_ops or remaining_fields:
-                                        self._log_to_slot(primary_slot_id, f"❌ FAILED: Fallback replacement incomplete. Remaining: {remaining_ops + remaining_fields}")
-                                        self.slot_manager.update_slot_status(slot_ids, "FAILED", f"Placeholders not replaced: {remaining_ops + remaining_fields}")
+                                        self._log_to_slot(primary_slot_id, f"❌ FAILED: Strict placeholder resolution incomplete. Remaining: {remaining_ops + remaining_fields}")
+                                        self.slot_manager.release_slots(slot_ids, success=False, error=f"Placeholders not replaced: {remaining_ops + remaining_fields}")
                                         return
                             else:
-                                # Fallback to old method
+                                # Strict mode: do not use independent placeholder fallback
                                 if has_operator_placeholders and available_operators:
-                                    template = self.workflow.generator.template_generator._replace_operator_placeholders(
-                                        template, available_operators
-                                    )
+                                    pass  # Strict mode: never substitute an independent random operator/field list
                                 if has_field_placeholders and available_fields:
-                                    template = self.workflow.generator.template_generator._replace_field_placeholders(
-                                        template, available_fields, template_region
-                                    )
+                                    pass  # Strict mode: never substitute an independent random operator/field list
                     
                     # Final check: Ensure NO placeholders remain before submission
                     import re
@@ -518,7 +525,7 @@ class Step5Simulation:
                         self._log_to_slot(primary_slot_id, f"   Remaining operators: {remaining_ops}")
                         self._log_to_slot(primary_slot_id, f"   Remaining fields: {remaining_fields}")
                         self._log_to_slot(primary_slot_id, f"   Template: {template[:100]}...")
-                        self.slot_manager.update_slot_status(slot_ids, "FAILED", f"Cannot submit: placeholders remain ({remaining_ops + remaining_fields})")
+                        self.slot_manager.release_slots(slot_ids, success=False, error=f"Cannot submit: placeholders remain ({remaining_ops + remaining_fields})")
                         self._log_to_slot(primary_slot_id, "❌ Skipping submission - template has unreplaced placeholders")
                         return
                     
@@ -543,7 +550,7 @@ class Step5Simulation:
                     progress_url = simulator.submit_simulation(template, template_region, settings)
                     
                     if progress_url:
-                        self.slot_manager.update_slot_progress(primary_slot_id, progress_url, f"✅ Submitted: {progress_url}")
+                        self.slot_manager.update_slot_progress(primary_slot_id, progress_url=progress_url, message=f"✅ Submitted: {progress_url}")
                         self._log_to_slot(primary_slot_id, f"✅ Submitted: {progress_url}")
                         self._log_result(f"[{template_index+1}/{len(templates)}] ✅ Submitted: {template[:50]}...\n")
                         
@@ -566,7 +573,18 @@ class Step5Simulation:
                             max_wait_time=300,  # 5 minutes max
                             progress_callback=progress_callback
                         )
-                        
+
+                        # Feed every observed BRAIN outcome into persistent research memory.
+                        try:
+                            research_memory = getattr(
+                                self.workflow.generator.template_generator,
+                                "research_memory", None
+                            )
+                            if research_memory:
+                                research_memory.record_result(result)
+                        except Exception as memory_error:
+                            logger.warning("Could not record BRAIN research outcome: %s", memory_error)
+
                         if result.success:
                             completed_count['successful'] += 1
                             # Ensure alpha_id is a string, not a tuple or list
@@ -577,20 +595,45 @@ class Step5Simulation:
                                 alpha_id = ''
                             else:
                                 alpha_id = str(alpha_id)
+                            metric_pass = _meets_research_metric_gates(result)
                             result_dict = {
                                 'alpha_id': alpha_id,
                                 'returns': result.returns,
                                 'sharpe': result.sharpe,
+                                'fitness': result.fitness,
                                 'turnover': result.turnover,
-                                'max_drawdown': result.max_drawdown
+                                'max_drawdown': result.max_drawdown,
+                                'metric_gate_pass': metric_pass,
+                                'correlation_review': 'PENDING'
                             }
                             self.slot_manager.release_slots(slot_ids, success=True, result=result_dict)
-                            self._update_slot_display(primary_slot_id, "COMPLETED", template[:40] + "...", 
-                                                     f"✅ Alpha: {alpha_id}", 
-                                                     [f"✅ SUCCESS", f"Returns: {result.returns:.4f}", f"Sharpe: {result.sharpe:.4f}"])
-                            self._log_to_slot(primary_slot_id, f"✅ SUCCESS - Alpha ID: {alpha_id}")
-                            self._log_to_slot(primary_slot_id, f"   Returns: {result.returns:.4f}, Sharpe: {result.sharpe:.4f}")
-                            self._log_result(f"✅ [{template_index+1}] SUCCESS - Alpha: {alpha_id}, Returns: {result.returns:.4f}, Sharpe: {result.sharpe:.4f}\n")
+                            display_status = "METRIC_PASS" if metric_pass else "COMPLETED_LOW_QUALITY"
+                            display_message = (
+                                "Metric gates passed; correlation review pending"
+                                if metric_pass else
+                                "Simulation completed; below research metric gates"
+                            )
+                            self._update_slot_display(
+                                primary_slot_id, display_status, template[:40] + "...",
+                                f"Alpha: {alpha_id}",
+                                [
+                                    "METRIC GATES PASSED" if metric_pass else "COMPLETED, NOT QUALIFIED",
+                                    f"Sharpe: {result.sharpe:.4f}",
+                                    f"Fitness: {result.fitness:.4f}",
+                                    f"Turnover: {result.turnover:.4f}",
+                                    "Correlation review: PENDING"
+                                ]
+                            )
+                            if metric_pass:
+                                self._log_to_slot(primary_slot_id, f"🟢 METRIC GATES PASSED - Alpha ID: {alpha_id}")
+                            else:
+                                self._log_to_slot(primary_slot_id, f"⚪ Simulation completed but failed metric gates - Alpha ID: {alpha_id}")
+                            self._log_result(
+                                f"{'🟢 METRIC PASS' if metric_pass else '⚪ COMPLETED, NOT QUALIFIED'} "
+                                f"[{template_index+1}] Alpha: {alpha_id}, Sharpe: {result.sharpe:.4f}, "
+                                f"Fitness: {result.fitness:.4f}, Turnover: {result.turnover:.4f}; "
+                                f"correlation review pending\n"
+                            )
                         else:
                             # V2-style refeed: Try to fix and retry
                             error_msg = result.error_message or "Unknown error"
@@ -629,48 +672,42 @@ class Step5Simulation:
                                         template = replaced
                                         self._log_to_slot(primary_slot_id, "✅ Placeholders replaced before refeed")
                                     else:
-                                        self._log_to_slot(primary_slot_id, "⚠️ Placeholder replacement failed, using fallback")
+                                        self._log_to_slot(primary_slot_id, "❌ Placeholder replacement failed; no fallback substitution will be attempted")
                                         # Fallback to old method
                                         if has_operator_placeholders:
-                                            template = self.workflow.generator.template_generator._replace_operator_placeholders(
-                                                template, available_operators
-                                            )
+                                            pass  # Strict mode: never substitute an independent random operator/field list
                                         if has_field_placeholders:
-                                            template = self.workflow.generator.template_generator._replace_field_placeholders(
-                                                template, available_fields, template_region
-                                            )
+                                            pass  # Strict mode: never substitute an independent random operator/field list
                                 else:
                                     # Fallback to old method
                                     if has_operator_placeholders and available_operators:
-                                        template = self.workflow.generator.template_generator._replace_operator_placeholders(
-                                            template, available_operators
-                                        )
+                                        pass  # Strict mode: never substitute an independent random operator/field list
                                     if has_field_placeholders and available_fields:
-                                        template = self.workflow.generator.template_generator._replace_field_placeholders(
-                                            template, available_fields, template_region
-                                        )
+                                        pass  # Strict mode: never substitute an independent random operator/field list
                             
                             self._log_to_slot(primary_slot_id, "🔄 Attempting refeed correction...")
                             self._update_slot_progress(primary_slot_id, 50.0, "Fixing template...", "")
                             
                             # Use refeed mechanism with both AST and prompt engineering
                             if self.workflow.generator.template_generator.template_validator:
-                                # Check if this is an event input error - use unlimited retries
+                                # Event-input failures are deterministic compiler constraints.
+                                # Repeating hundreds of corrections cannot make them valid.
                                 is_event_input_error = 'does not support event inputs' in error_msg.lower() or 'expects only event inputs' in error_msg.lower()
-                                max_refeed_attempts = 999 if is_event_input_error else 3  # Unlimited for event inputs
+                                max_refeed_attempts = 3
                                 
                                 fixed_template, fixes = self.workflow.generator.template_generator.template_validator.refeed_with_correction(
                                     template, error_msg, template_region, max_attempts=max_refeed_attempts
                                 )
                                 
                                 if fixed_template and fixed_template != template:
-                                    # UNLIMITED RETRY LOOP for event input errors
+                                    # At most one corrected resubmission. Repeated rejection
+                                    # is evidence to learn from, not a reason to pin a worker.
                                     current_template_for_retry = fixed_template
                                     current_error_msg = error_msg
                                     refeed_attempt = 0
-                                    max_refeed_retries = 999 if is_event_input_error else 1  # Unlimited for event inputs
-                                    
-                                    while refeed_attempt < max_refeed_retries:
+                                    max_refeed_retries = 1
+
+                                    while refeed_attempt < max_refeed_retries and not self.stop_simulation_flag:
                                         refeed_attempt += 1
                                         
                                         # Check if fixed template still has placeholders - replace them
@@ -708,23 +745,15 @@ class Step5Simulation:
                                                 else:
                                                     # Fallback
                                                     if has_op_placeholders:
-                                                        current_template_for_retry = self.workflow.generator.template_generator._replace_operator_placeholders(
-                                                            current_template_for_retry, available_operators
-                                                        )
+                                                        pass  # Strict mode: never substitute an independent random operator/field list
                                                     if has_field_placeholders:
-                                                        current_template_for_retry = self.workflow.generator.template_generator._replace_field_placeholders(
-                                                            current_template_for_retry, available_fields, template_region
-                                                        )
+                                                        pass  # Strict mode: never substitute an independent random operator/field list
                                             else:
                                                 # Fallback
                                                 if has_op_placeholders and available_operators:
-                                                    current_template_for_retry = self.workflow.generator.template_generator._replace_operator_placeholders(
-                                                        current_template_for_retry, available_operators
-                                                    )
+                                                    pass  # Strict mode: never substitute an independent random operator/field list
                                                 if has_field_placeholders and available_fields:
-                                                    current_template_for_retry = self.workflow.generator.template_generator._replace_field_placeholders(
-                                                        current_template_for_retry, available_fields, template_region
-                                                    )
+                                                    pass  # Strict mode: never substitute an independent random operator/field list
                                         
                                         self._log_to_slot(primary_slot_id, f"✅ Fixed with {len(fixes)} corrections (refeed attempt {refeed_attempt})")
                                         self._log_to_slot(primary_slot_id, f"Retrying with fixed template...")
@@ -743,7 +772,17 @@ class Step5Simulation:
                                                 max_wait_time=300,
                                                 progress_callback=progress_callback
                                             )
-                                            
+
+                                            try:
+                                                research_memory = getattr(
+                                                    self.workflow.generator.template_generator,
+                                                    "research_memory", None
+                                                )
+                                                if research_memory:
+                                                    research_memory.record_result(result_retry)
+                                            except Exception as memory_error:
+                                                logger.warning("Could not record retry research outcome: %s", memory_error)
+
                                             if result_retry.success:
                                                 completed_count['successful'] += 1
                                                 # Ensure alpha_id is a string, not a tuple or list
@@ -821,13 +860,9 @@ class Step5Simulation:
                                                             else:
                                                                 # Fallback
                                                                 if has_op_ph and available_operators:
-                                                                    fixed_template_again = self.workflow.generator.template_generator._replace_operator_placeholders(
-                                                                        fixed_template_again, available_operators
-                                                                    )
+                                                                    pass  # Strict mode: never substitute an independent random operator/field list
                                                                 if has_field_ph and available_fields:
-                                                                    fixed_template_again = self.workflow.generator.template_generator._replace_field_placeholders(
-                                                                        fixed_template_again, available_fields, template_region
-                                                                    )
+                                                                    pass  # Strict mode: never substitute an independent random operator/field list
                                                         
                                                         current_template_for_retry = fixed_template_again
                                                         current_error_msg = retry_error_msg
@@ -1073,6 +1108,8 @@ class Step5Simulation:
                 'IDLE': COLORS.get('text_secondary', '#666666'),
                 'RUNNING': COLORS.get('accent_yellow', '#ffff00'),
                 'COMPLETED': COLORS.get('accent_green', '#00ff41'),
+                'METRIC_PASS': COLORS.get('accent_green', '#00ff41'),
+                'COMPLETED_LOW_QUALITY': COLORS.get('accent_yellow', '#ffff00'),
                 'FAILED': '#ff0000'  # Red for failures
             }
             widget['status_label'].config(

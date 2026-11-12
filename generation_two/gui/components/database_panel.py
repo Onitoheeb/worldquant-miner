@@ -35,7 +35,9 @@ class DatabasePanel:
         self.frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
         self.current_db_type = tk.StringVar(value="local_sqlite")
-        self.current_db_path = tk.StringVar(value="")
+        # Match the database path used by CyberpunkGUI / EnhancedTemplateGeneratorV3.
+        active_db_path = Path(__file__).resolve().parents[2] / "generation_two_backtests.db"
+        self.current_db_path = tk.StringVar(value=str(active_db_path))
         self.current_db_url = tk.StringVar(value="")
         
         self._create_widgets()
@@ -268,7 +270,11 @@ class DatabasePanel:
                     config = json.load(f)
                 
                 self.current_db_type.set(config.get('type', 'local_sqlite'))
-                self.current_db_path.set(config.get('path', ''))
+                # Older saved configs may contain an empty path. Keep the active
+                # application database as the safe default instead of showing a blank field.
+                saved_path = config.get('path')
+                if saved_path:
+                    self.current_db_path.set(saved_path)
                 self.current_db_url.set(config.get('url', ''))
                 
                 self._create_config_widgets()

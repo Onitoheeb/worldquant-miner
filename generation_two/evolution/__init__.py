@@ -3,6 +3,7 @@ Evolution and optimization components
 """
 
 from .self_optimizer import SelfOptimizer
+from .research_memory import ResearchMemory
 from .alpha_quality_monitor import AlphaQualityMonitor
 from .alpha_evolution_engine import AlphaEvolutionEngine, AlphaResult
 from .on_the_fly_tester import OnTheFlyTester
@@ -17,6 +18,7 @@ from .advanced_bandits import (
 )
 
 __all__ = [
+    'ResearchMemory',
     'SelfOptimizer',
     'AlphaQualityMonitor',
     'AlphaEvolutionEngine',

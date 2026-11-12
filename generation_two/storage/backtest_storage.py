@@ -71,7 +71,8 @@ class BacktestStorage:
         log_file = f"{self.db_path}.tables_created"
         already_logged = os.path.exists(log_file)
         
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn.execute('PRAGMA busy_timeout = 30000')
         cursor = conn.cursor()
         
         cursor.execute('''
@@ -302,6 +303,14 @@ class BacktestStorage:
             conn.commit()
             conn.close()
             
+            # Mirror the exact observed simulation outcome into persistent research memory.
+            # This is observation-only: it never infers operator compatibility or submits work.
+            try:
+                from ..research_memory import ResearchMemory
+                ResearchMemory(self.db_path).record_result(result)
+            except Exception as memory_error:
+                logger.warning("Could not update research memory: %s", memory_error)
+
             logger.debug(f"Stored backtest result: {template[:50]}... (Sharpe={sharpe:.3f})")
             return True
             
@@ -954,17 +963,30 @@ class BacktestStorage:
             if existing:
                 # Update existing pattern
                 pattern_id, success_count, failure_count = existing
-                if success:
-                    success_count += 1
-                else:
-                    failure_count += 1
-                
+                # A validator can encounter the same BRAIN error through several
+                # retry/callback paths. Count an example only once so repeated
+                # logging does not inflate failure evidence.
+                cursor.execute(
+                    "SELECT example_template FROM ast_patterns WHERE id = ?",
+                    (pattern_id,)
+                )
+                previous_example = cursor.fetchone()
+                same_example = bool(
+                    example_template and previous_example and
+                    previous_example[0] == example_template
+                )
+                if not same_example:
+                    if success:
+                        success_count += 1
+                    else:
+                        failure_count += 1
+
                 cursor.execute('''
                     UPDATE ast_patterns SET
                         success_count = ?,
                         failure_count = ?,
-                        example_template = ?,
-                        metadata = ?,
+                        example_template = COALESCE(?, example_template),
+                        metadata = COALESCE(?, metadata),
                         last_used_at = CURRENT_TIMESTAMP
                     WHERE id = ?
                 ''', (success_count, failure_count, example_template, metadata_json, pattern_id))

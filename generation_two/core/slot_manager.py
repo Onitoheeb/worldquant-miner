@@ -59,12 +59,18 @@ class Slot:
     
     def update_progress(self, percent: float, message: str = "", api_status: str = ""):
         """Update progress information"""
-        # Ensure percent is a float (handle string inputs from API)
+        # Some legacy callers pass a status message in the percent position.
+        # Preserve it as text instead of logging a misleading invalid-percent warning.
         try:
             percent = float(percent)
         except (ValueError, TypeError):
-            logger.warning(f"Invalid percent value: {percent}, using 0.0")
-            percent = 0.0
+            if isinstance(percent, str) and percent.strip():
+                if not message:
+                    message = percent
+                percent = self.progress_percent
+            else:
+                logger.warning("Invalid progress value %r; retaining previous progress", percent)
+                percent = self.progress_percent
         self.progress_percent = max(0.0, min(100.0, percent))
         if message:
             self.progress_message = message
@@ -136,12 +142,18 @@ class SlotManager:
             List of assigned slot IDs or None if no slots available
         """
         num_slots = self.get_slots_required(region)
-        slot_ids = self.find_available_slots(num_slots)
-        
-        if not slot_ids:
-            return None
-        
+        # Find and reserve slots under the same lock. Separating these operations
+        # allows two workers to claim the same idle slot between the check and write.
         with self.lock:
+            slot_ids = None
+            for start in range(self.max_slots - num_slots + 1):
+                candidate = list(range(start, start + num_slots))
+                if all(self.slots[i].status == SlotStatus.IDLE for i in candidate):
+                    slot_ids = candidate
+                    break
+            if not slot_ids:
+                return None
+
             for slot_id in slot_ids:
                 slot = self.slots[slot_id]
                 slot.status = SlotStatus.RUNNING
@@ -189,9 +201,15 @@ class SlotManager:
                 else:
                     alpha_id = str(alpha_id)
                 slot.alpha_id = alpha_id
+                # Distinguish BRAIN completion from passing the research gates.
+                if isinstance(result, dict) and result.get('metric_gate_pass') is False:
+                    slot.add_log(f"⚪ COMPLETED, NOT QUALIFIED - Alpha ID: {slot.alpha_id or ''}")
+                elif isinstance(result, dict) and result.get('metric_gate_pass') is True:
+                    slot.add_log(f"🟢 METRIC GATES PASSED - Alpha ID: {slot.alpha_id or ''} (correlation review pending)")
+                else:
+                    slot.add_log(f"✅ SUCCESS - Alpha ID: {slot.alpha_id or ''}")
                 # Ensure message is a string before logging
                 alpha_id_str = str(slot.alpha_id) if slot.alpha_id else ''
-                slot.add_log(f"✅ SUCCESS - Alpha ID: {alpha_id_str}")
                 if isinstance(result, dict) and 'returns' in result:
                     slot.add_log(f"   Returns: {result['returns']:.4f}, Sharpe: {result.get('sharpe', 0):.4f}")
             elif error:

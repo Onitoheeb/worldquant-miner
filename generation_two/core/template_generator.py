@@ -6,6 +6,7 @@ Handles alpha expression generation using AI/LLM with smart Ollama integration
 import logging
 import requests
 import json
+import re
 from typing import List, Dict, Optional
 import time
 
@@ -13,8 +14,111 @@ from ..ollama import OllamaManager, RegionThemeManager
 from ..ollama.duplicate_detector import DuplicateDetector
 from ..data_fetcher import OperatorFetcher, DataFieldFetcher, SmartSearchEngine
 from .template_validator import TemplateValidator
+from ..research_memory import ResearchMemory
 
 logger = logging.getLogger(__name__)
+
+
+def _cleanup_legacy_event_input_flags(db_path: str) -> int:
+    """Clear event-input flags that were inferred heuristically in older versions.
+
+    Only explicit bool / 0 / 1 values in the persisted raw API payload are
+    authoritative. A full SQLite backup is created before the first mutation.
+    This runs during generator initialization so it does not depend on a data
+    field refresh being triggered by the GUI.
+    """
+    import os
+    import sqlite3
+
+    if not db_path or not os.path.isfile(db_path):
+        return 0
+
+    try:
+        from contextlib import closing
+
+        with closing(sqlite3.connect(db_path, timeout=30)) as conn:
+            with conn:
+                conn.execute("PRAGMA busy_timeout = 30000")
+            table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='field_types'"
+            ).fetchone()
+            if not table:
+                return 0
+
+            rows = conn.execute(
+                """
+                SELECT field_id, region, delay, is_event_input, field_data
+                FROM field_types
+                WHERE is_event_input IS NOT NULL
+                """
+            ).fetchall()
+
+            legacy_keys = []
+            for field_id, region, delay, stored_flag, raw in rows:
+                try:
+                    metadata = json.loads(raw) if raw else {}
+                except (TypeError, ValueError):
+                    metadata = {}
+                if not isinstance(metadata, dict):
+                    metadata = {}
+
+                explicit = metadata.get("is_event_input")
+                is_explicit = (
+                    isinstance(explicit, bool)
+                    or (isinstance(explicit, int) and explicit in (0, 1))
+                )
+                if not is_explicit:
+                    legacy_keys.append((field_id, region, delay))
+
+            if not legacy_keys:
+                return 0
+
+            backup_path = os.path.abspath(db_path) + ".event_flags_pre_cleanup.bak"
+            if not os.path.exists(backup_path):
+                source = sqlite3.connect(db_path, timeout=30)
+                backup = sqlite3.connect(backup_path, timeout=30)
+                try:
+                    source.backup(backup)
+                    check = backup.execute("PRAGMA integrity_check").fetchone()
+                    if not check or check[0] != "ok":
+                        raise sqlite3.DatabaseError(
+                            f"Pre-cleanup backup integrity check failed: {check}"
+                        )
+                except Exception:
+                    try:
+                        backup.close()
+                    finally:
+                        source.close()
+                    if os.path.exists(backup_path):
+                        os.remove(backup_path)
+                    raise
+                else:
+                    backup.close()
+                    source.close()
+
+            conn.executemany(
+                """
+                UPDATE field_types
+                SET is_event_input = NULL, updated_at = CURRENT_TIMESTAMP
+                WHERE field_id = ? AND region = ? AND delay = ?
+                """,
+                legacy_keys,
+            )
+            conn.commit()
+
+        logger.warning(
+            "Cleared %s legacy heuristic event-input flags from %s. "
+            "Pre-cleanup backup: %s",
+            len(legacy_keys), os.path.abspath(db_path), backup_path
+        )
+        return len(legacy_keys)
+    except Exception:
+        logger.exception(
+            "Could not safely clean legacy event-input flags in %s; "
+            "the existing classifications were left unchanged.",
+            db_path
+        )
+        return 0
 
 
 class TemplateGenerator:
@@ -48,6 +152,11 @@ class TemplateGenerator:
         self._stored_credentials = credentials  # Store credentials in memory for re-authentication
         self.deepseek_api_key = deepseek_api_key
         self.db_path = db_path
+        # Run the backed-up legacy metadata migration immediately. It must not
+        # depend on a GUI-triggered data-field refresh.
+        _cleanup_legacy_event_input_flags(self.db_path)
+        # Persistent, evidence-grounded memory shared with simulation storage.
+        self.research_memory = ResearchMemory(db_path)
         # Create session with cookie persistence enabled (default, but explicit)
         self.sess = requests.Session()
         # Ensure cookies are maintained across requests
@@ -189,9 +298,9 @@ class TemplateGenerator:
                 data_fields=[],  # Will be updated per region
                 ollama_manager=self.ollama_manager,
                 db_path=self.db_path,
-                use_ast=False  # Disable AST by default, use prompt engineering and database knowledge only
+                use_ast=True  # Require AST parsing before a template can be accepted
             )
-            logger.info("✅ Template validator initialized (AST disabled, using prompt engineering and database knowledge)")
+            logger.info("✅ Template validator initialized with strict FASTEXPR AST validation")
                 
         except Exception as e:
             logger.warning(f"Could not setup data fetchers: {e}")
@@ -283,6 +392,11 @@ class TemplateGenerator:
         Returns:
             Alpha expression string or None
         """
+        # Feed measured BRAIN outcomes back into every research/generation cycle.
+        research_context = self.research_memory.build_research_context(region)
+        if research_context:
+            prompt = f"{prompt}\n\n{research_context}"
+
         # Get theme requirements
         theme_requirements = self.theme_manager.get_theme_requirements(region)
         dataset_categories = self.theme_manager.get_required_categories(region)
@@ -319,7 +433,10 @@ class TemplateGenerator:
                 avoid_duplicates_context=avoidance_context,
                 available_operators=available_operators,
                 available_fields=available_fields,
-                successful_patterns=successful_patterns
+                successful_patterns=successful_patterns,
+                use_placeholder_fields=False,
+                use_placeholder_operators=False,
+                use_algorithmic_generation=False
             )
             
             if template:
@@ -353,7 +470,10 @@ class TemplateGenerator:
                         avoid_duplicates_context=stronger_context,
                         available_operators=available_operators,
                         available_fields=available_fields,
-                        successful_patterns=successful_patterns
+                        successful_patterns=successful_patterns,
+                        use_placeholder_fields=False,
+                        use_placeholder_operators=False,
+                        use_algorithmic_generation=False
                     )
                 
                 if template and not self.duplicate_detector.is_duplicate(template):
@@ -513,6 +633,7 @@ class TemplateGenerator:
         Returns:
             List of alpha expressions
         """
+        self.research_memory.record_hypothesis(hypothesis, region)
         prompt = f"""
         Hypothesis: {hypothesis}
         Available data fields: {', '.join(data_fields[:10])}
@@ -574,9 +695,14 @@ class TemplateGenerator:
             universe=universe
         )
         
-        # Store field types (including event input detection) in database
+        # Persist explicit classifications, then enrich API fields from the
+        # region/delay-specific database catalogue before validation or search.
         if fields:
             self._store_field_types(fields, region, delay)
+            fields = self._load_event_input_metadata(fields, region, delay)
+
+            if self.template_validator:
+                self.template_validator.update_data_fields(fields)
         
         # Update search engine with fetched fields
         if self.search_engine and fields:
@@ -588,60 +714,201 @@ class TemplateGenerator:
         
         return fields
     
+    def _load_event_input_metadata(
+        self,
+        fields: List[Dict],
+        region: str,
+        delay: int
+    ) -> List[Dict]:
+        """Attach only explicitly supplied event-input classifications.
+
+        Historical rows may contain heuristic flags inferred from words such as
+        "event" in a field name or description. Those values are not authoritative.
+        If the original API field payload has no explicit is_event_input value,
+        leave the classification unknown and let BRAIN simulation decide.
+        """
+        if not fields:
+            return []
+
+        import os
+        import sqlite3
+        from ..storage.backtest_storage import BacktestStorage
+
+        storage = BacktestStorage(self.db_path)
+
+        # Keep a one-time full database backup before removing classifications
+        # written by the old name/description heuristic.
+        backup_path = os.path.abspath(storage.db_path) + ".event_flags_pre_cleanup.bak"
+        if not os.path.exists(backup_path):
+            source = sqlite3.connect(storage.db_path, timeout=30)
+            backup = sqlite3.connect(backup_path)
+            try:
+                source.backup(backup)
+            finally:
+                backup.close()
+                source.close()
+
+        with sqlite3.connect(storage.db_path, timeout=30) as conn:
+            conn.execute("PRAGMA busy_timeout = 30000")
+            records = conn.execute(
+                """
+                SELECT field_id, is_event_input, field_data
+                FROM field_types
+                WHERE region = ? AND delay = ?
+                """,
+                (region, delay),
+            ).fetchall()
+
+            raw_metadata = {}
+            legacy_ids = []
+            for field_id, stored_flag, raw in records:
+                try:
+                    metadata = json.loads(raw) if raw else {}
+                except (TypeError, ValueError):
+                    metadata = {}
+                raw_metadata[field_id] = metadata
+
+                explicit = metadata.get("is_event_input")
+                is_explicit = (
+                    isinstance(explicit, bool)
+                    or (isinstance(explicit, int) and explicit in (0, 1))
+                )
+                if not is_explicit and stored_flag is not None:
+                    legacy_ids.append((field_id, region, delay))
+
+            if legacy_ids:
+                conn.executemany(
+                    """
+                    UPDATE field_types
+                    SET is_event_input = NULL, updated_at = CURRENT_TIMESTAMP
+                    WHERE field_id = ? AND region = ? AND delay = ?
+                    """,
+                    legacy_ids,
+                )
+                logger.warning(
+                    "Cleared %s legacy heuristic event-input flags for %s delay=%s. "
+                    "Database backup: %s",
+                    len(legacy_ids), region, delay, backup_path
+                )
+
+        def explicit_flag(value):
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, int) and value in (0, 1):
+                return bool(value)
+            return None
+
+        enriched_fields = []
+        unknown = []
+        for field in fields:
+            field_id = field.get("id", "")
+            enriched = dict(field)
+            if field_id:
+                # Prefer the live API payload. The stored payload is a fallback
+                # for callers that provide a reduced field object.
+                flag = explicit_flag(field.get("is_event_input"))
+                if flag is None:
+                    flag = explicit_flag(
+                        raw_metadata.get(field_id, {}).get("is_event_input")
+                    )
+                enriched["is_event_input"] = flag
+                if flag is None:
+                    unknown.append(field_id)
+            enriched_fields.append(enriched)
+
+        if unknown:
+            logger.warning(
+                "Event-input status is unknown for %s %s delay=%s fields "
+                "(including %s). Legacy heuristic flags are ignored; local "
+                "event compatibility checks will be skipped for these fields "
+                "and BRAIN simulation remains authoritative.",
+                len(unknown), region, delay, ", ".join(unknown[:10])
+            )
+
+        return enriched_fields
+
     def _store_field_types(self, fields: List[Dict], region: str, delay: int):
-        """Store field type information including event input detection"""
+        """Persist field metadata without inferring event status from text."""
+        if not fields:
+            return
+
         try:
+            import json
+            import sqlite3
             from ..storage.backtest_storage import BacktestStorage
-            storage = BacktestStorage()
-            
+
+            storage = BacktestStorage(self.db_path)
+            rows = []
+
             for field in fields:
-                field_id = field.get('id', '')
+                field_id = field.get("id", "")
                 if not field_id:
                     continue
-                
-                # Detect event input fields
-                field_type = field.get('type', 'REGULAR')
-                category = field.get('category', {})
-                category_name = category.get('name', '') if isinstance(category, dict) else str(category)
-                
-                # Check if field is event input
-                is_event_input = (
-                    field_type == 'EVENT' or
-                    'event' in str(field_type).lower() or
-                    'event' in category_name.lower() or
-                    'event' in str(field.get('name', '')).lower() or
-                    'event' in str(field.get('description', '')).lower()
+
+                field_type = field.get("type", "REGULAR")
+                category = field.get("category", {})
+                category_name = (
+                    category.get("name", "")
+                    if isinstance(category, dict)
+                    else str(category)
                 )
-                
-                # Store in database
-                import sqlite3
-                import json
-                from ..storage.backtest_storage import BacktestStorage
-                storage = BacktestStorage(self.db_path)
-                conn = sqlite3.connect(storage.db_path)
-                cursor = conn.cursor()
-                
-                cursor.execute('''
-                    INSERT OR REPLACE INTO field_types
-                    (field_id, region, delay, field_type, is_event_input, category, field_data, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                ''', (
+
+                explicit_flag = field.get("is_event_input")
+                if isinstance(explicit_flag, bool):
+                    is_event_input = int(explicit_flag)
+                elif isinstance(explicit_flag, int) and explicit_flag in (0, 1):
+                    is_event_input = explicit_flag
+                else:
+                    # NULL means unknown. On conflict, preserve the existing
+                    # region/delay-specific classification.
+                    is_event_input = None
+
+                rows.append((
                     field_id,
                     region,
                     delay,
                     field_type,
-                    1 if is_event_input else 0,
+                    is_event_input,
                     category_name,
-                    json.dumps(field)
+                    json.dumps(field),
                 ))
-                
-                conn.commit()
-                conn.close()
-            
-            logger.debug(f"Stored {len(fields)} field types for {region} delay={delay}")
+
+            if not rows:
+                return
+
+            with sqlite3.connect(storage.db_path, timeout=30) as conn:
+                conn.execute("PRAGMA busy_timeout = 30000")
+                conn.executemany(
+                    """
+                    INSERT INTO field_types (
+                        field_id, region, delay, field_type,
+                        is_event_input, category, field_data, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(field_id, region, delay)
+                    DO UPDATE SET
+                        field_type = excluded.field_type,
+                        category = excluded.category,
+                        field_data = excluded.field_data,
+                        is_event_input = COALESCE(
+                            excluded.is_event_input,
+                            field_types.is_event_input
+                        ),
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    rows,
+                )
+
+            logger.debug(
+                "Stored %s field records for %s delay=%s",
+                len(rows), region, delay
+            )
         except Exception as e:
-            logger.debug(f"Failed to store field types: {e}")
-    
+            logger.warning(
+                "Failed to store field types for %s delay=%s: %s",
+                region, delay, e
+            )
+
     def generate_templates_for_region(
         self,
         region: str,
@@ -682,13 +949,13 @@ class TemplateGenerator:
                         validator.operators = operators
                         logger.info(f"✅ Updated validator with {len(operators)} operators (AST disabled)")
             
-            # Update data fields for this region
-            if validator.use_ast and validator.parser:
-                validator.parser.add_data_fields(data_fields)
-                logger.info(f"✅ Updated validator with {len(data_fields)} data fields for {region}")
-            else:
-                validator.data_fields = data_fields
-                logger.info(f"✅ Updated validator with {len(data_fields)} data fields for {region} (AST disabled)")
+            # Replace active regional metadata; do not merge fields from a
+            # previously selected region into the current parser.
+            validator.update_data_fields(data_fields)
+            logger.info(
+                "Updated validator with %s classified data fields for %s",
+                len(data_fields), region
+            )
         
         # Get storage instance for template similarity checking
         from ..storage.backtest_storage import BacktestStorage
@@ -775,12 +1042,17 @@ Generate a valid FASTEXPR expression that uses operator(data_field, parameters) 
                             use_placeholder_fields=True  # Enable V2 placeholder approach
                         )
                     
-                    # Step 4: Replace placeholders with actual operator names and field IDs
-                    if template and selected_operators:
-                        template = self._replace_operator_placeholders(template, selected_operators)
-                    if template and selected_fields:
-                        template = self._replace_field_placeholders(template, selected_fields, region)
-                    
+                    # Never resolve unresolved placeholders with a separate random list.
+                    # The selection used to create the expression must be the selection
+                    # used to resolve it; otherwise the expression's construction is invalid.
+                    if template and re.search(r'\b(?:OPERATOR|DATA_FIELD)\d+\b', template, re.IGNORECASE):
+                        logger.warning(
+                            "Generated template still contains unresolved placeholders; "
+                            "rejecting it instead of substituting independently selected operators/fields: %s",
+                            template[:120]
+                        )
+                        template = None
+
                     if not template:
                         logger.warning(f"Failed to generate template {i+1}, attempt {retry_count + 1}")
                         retry_count += 1
@@ -847,7 +1119,10 @@ Generate a valid FASTEXPR expression that uses operator(data_field, parameters) 
                                     logger.info(f"✅ Template {i+1} fixed and compiled")
                                     self.template_validator.learn_from_success(template)
                                 else:
-                                    logger.warning(f"⚠️ Template {i+1} still invalid after fixes, but including it")
+                                    logger.error(
+                                        f"❌ Template {i+1} remains invalid after correction; rejecting before storage/simulation"
+                                    )
+                                    continue
                             else:
                                 logger.warning(f"⚠️ Could not fix template {i+1}, skipping")
                                 continue

@@ -304,6 +304,24 @@ class Step4Generation:
                 self.stop_generation_button.config(state=tk.DISABLED)
                 return
             
+            # Ollama availability is lazy by design. Check it once before worker
+            # threads start so the LLM research path is actually reachable.
+            ollama_manager = getattr(
+                self.workflow.generator.template_generator, "ollama_manager", None
+            )
+            if ollama_manager and not getattr(ollama_manager, "is_available", False):
+                try:
+                    available = ollama_manager._check_availability()
+                    logger.info(
+                        "[Step 4] Ollama research availability: %s",
+                        "available" if available else "unavailable; using algorithmic fallback"
+                    )
+                except Exception as availability_error:
+                    logger.warning(
+                        "[Step 4] Ollama health check failed; using algorithmic fallback: %s",
+                        availability_error
+                    )
+
             # Update validator with operators and fields
             if self.workflow.generator.template_generator.template_validator:
                 validator = self.workflow.generator.template_generator.template_validator
@@ -330,6 +348,20 @@ class Step4Generation:
             if self.workflow.generator.template_generator.template_validator and self.workflow.generator.template_generator.template_validator.corrector:
                 successful_patterns = self.workflow.generator.template_generator.template_validator.corrector.get_successful_patterns(limit=5)
             
+            # Persist the exact catalogue available to this research run so later
+            # experiments can be interpreted against the right field/operator metadata.
+            research_memory = getattr(
+                self.workflow.generator.template_generator, "research_memory", None
+            )
+            if research_memory:
+                research_memory.record_catalogue(
+                    region=region,
+                    operators=available_operators or [],
+                    fields=data_fields,
+                    delay=1,
+                    alpha_type="REGULAR"
+                )
+
             # Queue for templates to generate
             template_queue = list(range(count))
             generated_templates = []
@@ -364,6 +396,111 @@ The expression should combine OPERATORS (functions like ts_rank, ts_delta, rank)
 
 Generate a valid FASTEXPR expression that uses operator(data_field, parameters) syntax."""
                     
+                    # Research-led path: let the LLM propose a complete expression using
+                    # measured BRAIN research memory. Keep the algorithmic placeholder
+                    # generator as a fallback when Ollama is unavailable or its output
+                    # fails strict local compilation.
+                    template_generator = self.workflow.generator.template_generator
+                    ollama_manager = getattr(template_generator, "ollama_manager", None)
+                    if ollama_manager and getattr(ollama_manager, "is_available", False):
+                        try:
+                            research_memory = getattr(template_generator, "research_memory", None)
+                            research_prompt = (
+                                research_memory.build_evolution_prompt(region, count=1)
+                                if research_memory else
+                                f"Develop one testable quantitative alpha hypothesis for {region}."
+                            )
+                            llm_prompt = (
+                                f"{research_prompt}\n\n"
+                                "Generate exactly ONE FASTEXPR expression using only the "
+                                "operator and data-field catalogues supplied to you. "
+                                "Do not return explanations, markdown, placeholders, or "
+                                "multiple alternatives. Prefer a distinct research idea "
+                                "over a cosmetic mutation."
+                            )
+                            if self.gen_slot_manager:
+                                slot = self.gen_slot_manager.get_slot_status(primary_slot_id)
+                                slot.update_progress(28.0, "LLM research and hypothesis generation...", "")
+                                slot.add_log("LLM is researching a candidate using measured experiment history.")
+                            llm_candidate = template_generator.generate_template_from_prompt(
+                                llm_prompt, region=region, use_ollama=True
+                            )
+                            if llm_candidate:
+                                llm_candidate = llm_candidate.strip().strip("`").strip()
+                                if research_memory:
+                                    research_memory.record_hypothesis(
+                                        research_prompt,
+                                        region,
+                                        status="candidate_generated",
+                                        supporting_evidence=llm_candidate
+                                    )
+                                validator = getattr(template_generator, "template_validator", None)
+                                compile_result = (
+                                    validator.compile_template(llm_candidate, optimize=False)
+                                    if validator and getattr(validator, "use_ast", False)
+                                    else None
+                                )
+                                locally_valid = bool(compile_result and compile_result.success)
+                                has_placeholders = bool(
+                                    __import__("re").search(
+                                        r"\b(?:OPERATOR|DATA_FIELD)\d+\b",
+                                        llm_candidate,
+                                        __import__("re").IGNORECASE
+                                    )
+                                )
+                                if locally_valid and not has_placeholders:
+                                    if compile_result.final_expression:
+                                        llm_candidate = compile_result.final_expression
+                                    generated_templates.append({
+                                        "template": llm_candidate,
+                                        "region": region
+                                    })
+                                    completed_count["successful"] += 1
+                                    try:
+                                        from generation_two.core import template_similarity
+                                        checker = template_similarity.TemplateSimilarityChecker()
+                                        template_generator_backtest_storage = getattr(
+                                            self.workflow.generator, "backtest_storage", None
+                                        )
+                                        if template_generator_backtest_storage:
+                                            template_generator_backtest_storage.store_template(
+                                                template=llm_candidate,
+                                                region=region,
+                                                operators_used=list(checker.extract_operators(llm_candidate)),
+                                                fields_used=list(checker.extract_fields(llm_candidate))
+                                            )
+                                    except Exception as store_error:
+                                        logger.warning("Could not store LLM candidate: %s", store_error)
+                                    self._log_to_gen_slot(
+                                        primary_slot_id,
+                                        f"LLM research candidate compiled locally: {llm_candidate[:70]}..."
+                                    )
+                                    self._update_gen_slot_display(
+                                        primary_slot_id, "GENERATED", llm_candidate[:55],
+                                        "LLM research candidate, awaiting BRAIN simulation",
+                                        ["LLM hypothesis generation", "Local FASTEXPR compilation passed",
+                                         "BRAIN simulation still required"],
+                                        100.0, ""
+                                    )
+                                    self.gen_slot_manager.release_slots(
+                                        slot_ids, success=True,
+                                        result={"template": llm_candidate, "source": "llm_research"}
+                                    )
+                                    return
+                                logger.warning(
+                                    "[Step 4] LLM candidate failed strict local compilation; "
+                                    "falling back to algorithmic generation."
+                                )
+                                self._log_to_gen_slot(
+                                    primary_slot_id,
+                                    "LLM candidate did not pass local compilation; using validated fallback path."
+                                )
+                        except Exception as research_error:
+                            logger.warning(
+                                "[Step 4] LLM research generation failed; using algorithmic fallback: %s",
+                                research_error
+                            )
+
                     # Update progress before algorithmic template generation.
                     # Step 4 currently does not call Ollama; it creates placeholders locally.
                     if self.gen_slot_manager:
@@ -389,12 +526,42 @@ Generate a valid FASTEXPR expression that uses operator(data_field, parameters) 
                     selected_operator_indices = []
                     selected_operators_list = available_operators
                     if available_operators:
+                        # Use the same authoritative metadata as the AST generator to
+                        # enforce REGULAR scope before an operator enters a candidate.
+                        from generation_two.core.algorithmic_template_generator import AlgorithmicTemplateGenerator
+                        catalogue_metadata = AlgorithmicTemplateGenerator(
+                            available_operators, data_fields, alpha_type="REGULAR"
+                        ).operator_metadata
                         # V2 approach: Select 2-4 operators (not more) to keep expressions simple
                         # Use exclusive selection with usage-based diversity
                         with operator_pool_lock:
                             # First, filter out operators that are currently in use OR have been used in this batch
+                            # vec_* operators require VECTOR-typed inputs. This
+                            # placeholder generator does not build type-directed AST
+                            # leaves, so never offer vector operators for arbitrary fields.
+                            eligible_operator_indices = []
+                            for i, operator in enumerate(available_operators):
+                                name = str(operator.get("name", "")).strip()
+                                metadata = catalogue_metadata.get(name)
+                                if not name or not metadata:
+                                    continue
+                                if name.lower().startswith("vec_"):
+                                    continue
+                                # This local placeholder path pairs operators with
+                                # arbitrary randomly selected fields. densify requires
+                                # a known GROUP field, so it must be generated only by a
+                                # type-directed research path, never by random selection.
+                                if name.lower() == "densify":
+                                    continue
+                                scopes = {
+                                    str(scope).upper()
+                                    for scope in (getattr(metadata, "scope", None) or [])
+                                }
+                                if scopes and "REGULAR" not in scopes:
+                                    continue
+                                eligible_operator_indices.append(i)
                             available_indices = [
-                                i for i in range(len(available_operators)) 
+                                i for i in eligible_operator_indices
                                 if i not in used_operator_indices
                             ]
                             
@@ -419,11 +586,22 @@ Generate a valid FASTEXPR expression that uses operator(data_field, parameters) 
                                 logger.debug(f"[Step 4] Slot {primary_slot_id+1}: Not enough available operators, resetting usage counts...")
                                 used_operator_indices.clear()
                                 operator_usage_count.clear()
-                                candidate_indices = list(range(len(available_operators)))
+                                candidate_indices = eligible_operator_indices[:]
                                 if len(candidate_indices) < 2:
-                                    # If still not enough, we have to use batch-used operators (shouldn't happen with 79 operators)
-                                    logger.warning(f"[Step 4] Slot {primary_slot_id+1}: Very few operators available, allowing batch-used operators")
-                                    candidate_indices = list(range(len(available_operators)))
+                                    logger.error(
+                                        "[Step 4] Fewer than two non-vector operators are available; "
+                                        "skipping this candidate rather than generating a VECTOR/MATRIX mismatch."
+                                    )
+                                    completed_count['failed'] += 1
+                                    self.gen_slot_manager.release_slots(
+                                        slot_ids, success=False,
+                                        error="Insufficient compatible non-vector operators"
+                                    )
+                                    self._update_gen_slot_display(
+                                        primary_slot_id, "FAILED", "Insufficient compatible operators",
+                                        "Candidate skipped", ["No safe operator set available"], 100.0, ""
+                                    )
+                                    return
                             
                             # Sort by usage count (ascending) to prefer less-used operators
                             candidate_indices.sort(key=lambda i: operator_usage_count.get(i, 0))

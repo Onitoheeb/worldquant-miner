@@ -84,6 +84,8 @@ class CyberpunkGUI:
         # Initialize system (will be set after authentication)
         self.config_manager = ConfigManager()
         self.generator = None
+        # Use one deterministic database path regardless of the process working directory.
+        self.db_path = str(Path(__file__).resolve().parents[1] / "generation_two_backtests.db")
         self.evolution_executor = None
         self.authenticated = False
         
@@ -179,7 +181,7 @@ class CyberpunkGUI:
             credentials = [creds.username, creds.password]
             
             # Pass credentials directly (no temp file needed)
-            self.generator = EnhancedTemplateGeneratorV3(credentials=credentials)
+            self.generator = EnhancedTemplateGeneratorV3(credentials=credentials, db_path=self.db_path)
                 
         except Exception as e:
             logger.error(f"Failed to initialize generator: {e}", exc_info=True)

@@ -22,7 +22,7 @@ class TemplateValidator:
     3. Learning from simulation errors
     """
     
-    def __init__(self, operators: List[Dict] = None, data_fields: List[Dict] = None, ollama_manager=None, db_path: str = None, use_ast: bool = False):
+    def __init__(self, operators: List[Dict] = None, data_fields: List[Dict] = None, ollama_manager=None, db_path: str = None, use_ast: bool = True):
         """
         Initialize validator
         
@@ -31,7 +31,7 @@ class TemplateValidator:
             data_fields: List of data field dicts from API
             ollama_manager: Ollama manager for prompt-based correction
             db_path: Path to database for storing compiler knowledge (defaults to "generation_two_backtests.db")
-            use_ast: Whether to use AST parsing for validation (default: False - uses prompt engineering only)
+            use_ast: Whether to use AST parsing for validation (default: True - strict compiler validation)
         """
         self.use_ast = use_ast
         self.db_path = db_path or "generation_two_backtests.db"
@@ -41,6 +41,9 @@ class TemplateValidator:
             self.parser = FASTEXPRParser(operators=operators, data_fields=data_fields)
             # Pass db_path to parser so it can be used by SelfCorrectingAST
             self.parser.db_path = self.db_path
+            # Reuse BRAIN-observed event-input restrictions across application
+            # restarts; the JSON catalogue alone does not contain learned rules.
+            self.parser.load_event_input_knowledge_from_db(self.db_path)
             self.corrector = SelfCorrectingAST(self.parser)
             self.validator = FASTEXPRValidator(self.parser, self.corrector)
             # Initialize compiler for full compilation pipeline
@@ -80,76 +83,43 @@ class TemplateValidator:
             ],
         }
     
+    def update_data_fields(self, data_fields: List[Dict]) -> None:
+        """Replace the active field catalogue used by FASTEXPR validation.
+
+        The validator is created before region fields are fetched. Without this
+        update, its parser keeps an empty/stale metadata catalogue and cannot
+        detect event inputs before BRAIN submission.
+        """
+        self.data_fields = list(data_fields or [])
+        if self.use_ast and self.parser:
+            # Field IDs can overlap between regions. Replace, rather than merge,
+            # so metadata from a previous region cannot classify the active one.
+            self.parser.data_fields.clear()
+            self.parser.field_types.clear()
+            self.parser.add_data_fields(self.data_fields)
+            logger.info(
+                "Updated FASTEXPR validator with %s field metadata records",
+                len(self.data_fields),
+            )
+
     def _cleanup_template(self, template: str) -> str:
         """
-        Clean up common syntax errors in generated templates
-        
-        Fixes:
-        - Removes region prefixes (USA., EUR., CHN., etc.)
-        - Removes leading + signs before fields
-        - Fixes invalid * operator usage
-        - Removes invalid commas
-        - Fixes other common syntax issues
+        Apply only safe outer formatting cleanup.
+
+        Do not rewrite operators, commas, arithmetic, or parentheses with regex:
+        those transformations can silently change the meaning of a FASTEXPR.
+        Structural correctness is checked by FASTEXPRParser.
         """
-        import re
-        
-        cleaned = template.strip()
-        
-        # Remove region prefixes (USA., EUR., CHN., ASI., GLB., IND.)
-        cleaned = re.sub(r'\b(USA|EUR|CHN|ASI|GLB|IND)\.([a-z][a-z0-9_]+)\b', r'\2', cleaned, flags=re.IGNORECASE)
-        
-        # Remove leading + signs before fields or operators
-        cleaned = re.sub(r'\(\s*\+([a-z][a-z0-9_]+)', r'(\1', cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r'\(\s*\+([a-z_]+)\s*\(', r'(\1(', cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r'\s*\+\s*([a-z][a-z0-9_]+)\s*\)', r' \1)', cleaned, flags=re.IGNORECASE)
-        
-        # Fix invalid * operator at start (*(field -> multiply(field or just field)
-        cleaned = re.sub(r'\(\s*\*\s*\(([a-z][a-z0-9_]+)', r'(\1', cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r'\(\s*\*\s*([a-z][a-z0-9_]+)', r'(\1', cleaned, flags=re.IGNORECASE)
-        
-        # FASTEXPR DOES use commas for operator parameters!
-        # Keep commas between field and parameter: operator(field, param) is CORRECT
-        # Only remove commas in clearly wrong contexts (like between closing parens without operator)
-        # Pattern: field, number or field, field - these are CORRECT (keep them)
-        # Pattern: ), number or ), field - these might be wrong if not in operator context
-        # For now, keep all commas - they're needed for operator parameters
-        
-        # Fix missing commas: ) number -> ), number (common error from LLM)
-        # Pattern: ) followed by number or identifier -> ), number/identifier
-        import re
-        cleaned = re.sub(r'\)\s+(\d+)', r'), \1', cleaned)  # ) 20 -> ), 20
-        cleaned = re.sub(r'\)\s+([a-z][a-z0-9_]+)', r'), \1', cleaned)  # ) field -> ), field
-        
-        # Fix double operators (rankrank -> rank, ts_meants_mean -> ts_mean)
-        cleaned = re.sub(r'([a-z_]+)\1', r'\1', cleaned, flags=re.IGNORECASE)
-        
-        # Fix invalid operator combinations (add(field1 + field2) -> field1 + field2)
-        cleaned = re.sub(r'\b(add|multiply|subtract|divide)\s*\(([^)]+\+[^)]+)\)', r'(\2)', cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r'\b(add|multiply|subtract|divide)\s*\(([^)]+\*[^)]+)\)', r'(\2)', cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r'\b(add|multiply|subtract|divide)\s*\(([^)]+-[^)]+)\)', r'(\2)', cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r'\b(add|multiply|subtract|divide)\s*\(([^)]+/[^)]+)\)', r'(\2)', cleaned, flags=re.IGNORECASE)
-        
-        # Remove extra spaces
-        cleaned = re.sub(r'\s+', ' ', cleaned)
-        cleaned = cleaned.strip()
-        
-        # Fix unbalanced parentheses (remove trailing extra closing parens)
-        # This can happen after deduplication of nested operators
-        open_count = cleaned.count('(')
-        close_count = cleaned.count(')')
-        if close_count > open_count:
-            # Remove trailing extra closing parentheses
-            extra_closes = close_count - open_count
-            # Remove from the end, but be careful not to break valid expressions
-            # Only remove if they're clearly trailing
-            while extra_closes > 0 and cleaned.endswith(')'):
-                cleaned = cleaned[:-1]
-                extra_closes -= 1
-            if extra_closes > 0:
-                logger.debug(f"⚠️ Template still has {extra_closes} extra closing parentheses after cleanup")
-        
+        cleaned = (template or "").strip()
+        if cleaned.startswith("```"):
+            lines = cleaned.splitlines()
+            if lines:
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            cleaned = "\n".join(lines).strip()
         return cleaned
-    
+
     def validate_template(self, template: str, region: str = None, delay: int = None) -> Tuple[bool, str, Optional[str]]:
         """
         Validate template
@@ -225,10 +195,8 @@ class TemplateValidator:
                     fixes_applied.append("Prompt engineering fix")
                     return fixed_prompt, fixes_applied
                 else:
-                    # Try combining both fixes
-                    combined = self._combine_fixes(fixed_ast, fixed_prompt)
-                    fixes_applied.append("Combined AST + prompt fix")
-                    return combined, fixes_applied
+                    logger.warning("AI correction did not pass FASTEXPR validation; rejecting the proposed fix")
+                    return fixed_ast, fixes_applied
         
         # Return AST fix even if not perfect
         return fixed_ast, fixes_applied
@@ -317,12 +285,12 @@ class TemplateValidator:
         fixes_applied = []
         fixed_template = template
         
-        # Check for event input errors
+        # Event-input compatibility is recorded by the simulation failure path.
+        # Do not learn again while attempting a repair; repair must not turn an
+        # unverified operator guess into persistent compiler knowledge.
         if 'does not support event inputs' in error_message.lower() or 'expects only event inputs' in error_message.lower():
             fixed_template, event_fixes = self._fix_event_input_error(fixed_template, error_message, region)
             fixes_applied.extend(event_fixes)
-            # Learn and save the incompatible operator
-            self._learn_event_input_compatibility(template, error_message)
         
         # Fix missing lookback parameter: "Required attribute 'lookback' must have a value"
         if "required attribute" in error_message.lower() and "lookback" in error_message.lower():
@@ -492,8 +460,10 @@ Common FASTEXPR errors:
 DIAGNOSIS (be specific):"""
 
         try:
-            diagnosis = self.ollama_manager.generate(diagnosis_prompt, max_tokens=200)
-            logger.debug(f"AI Diagnosis: {diagnosis[:100] if diagnosis else 'None'}")
+            # Avoid a separate diagnostic LLM round-trip. Include the error and
+            # broken expression in the repair prompt below so one request does both.
+            diagnosis = None
+            logger.debug("Using single-pass FASTEXPR repair (diagnosis folded into repair prompt)")
         except Exception as e:
             logger.debug(f"Diagnosis step failed: {e}")
             diagnosis = None
@@ -594,28 +564,41 @@ FIXED EXPRESSION:"""
         fixed = None  # Initialize to avoid "cannot access local variable" error
         try:
             # Use higher max_tokens for complex fixes
-            response = self.ollama_manager.generate(fix_prompt, max_tokens=800)
+            response = self.ollama_manager.generate(fix_prompt, temperature=0.1, max_tokens=300)
             if response:
                 # Extract expression from response
                 fixed = self._extract_expression_from_response(response)
                 
-                # Step 3: Validate and retry if needed
+                # Step 3: Validate the candidate before accepting it. A short
+                # model response such as "fixed_exp_expr" is not an expression
+                # and must never become the next refeed candidate.
                 if fixed and fixed != template:
-                    # Quick validation: check parentheses balance
                     open_parens = fixed.count('(')
                     close_parens = fixed.count(')')
-                    if open_parens == close_parens:
-                        logger.info(f"✅ AI agent fixed template (diagnosis: {diagnosis[:50] if diagnosis else 'N/A'})")
-                        return fixed, ["AI agent fix with diagnosis"]
-                    else:
-                        # Retry with balance fix
-                        logger.debug(f"Retrying fix - parentheses unbalanced: {open_parens} open, {close_parens} close")
+                    if open_parens != close_parens:
+                        logger.debug(
+                            "Rejecting repair response with unbalanced parentheses: %s open, %s close",
+                            open_parens,
+                            close_parens
+                        )
                         if open_parens > close_parens:
                             fixed = fixed + ')' * (open_parens - close_parens)
-                        elif close_parens > open_parens:
+                        else:
                             fixed = '(' * (close_parens - open_parens) + fixed
-                        logger.info(f"✅ AI agent fixed template (with balance correction)")
-                        return fixed, ["AI agent fix with balance correction"]
+
+                    compile_result = self.compile_template(fixed, optimize=False)
+                    if compile_result.success:
+                        logger.info("AI repair passed FASTEXPR compilation")
+                        return fixed, ["AI agent repair passed compiler validation"]
+
+                    repair_errors = [
+                        getattr(error, "message", str(error))
+                        for error in (compile_result.errors or [])
+                    ]
+                    logger.warning(
+                        "Rejecting AI repair because FASTEXPR compilation failed: %s",
+                        repair_errors[:3]
+                    )
         except Exception as e:
             logger.warning(f"AI agent fix failed: {e}")
         
@@ -885,29 +868,27 @@ FIXED EXPRESSION:"""
         current_template = template
         all_fixes = []
         
-        # Check if this is an event input error - retry indefinitely
+        # Repair must always be bounded. Previously selected error classes could
+        # override the caller's limit with 999 and trap the generator in Ollama loops.
+        requested_attempts = max(1, int(max_attempts or 1))
+        max_attempts = min(requested_attempts, 5)
+        if requested_attempts > max_attempts:
+            logger.warning(
+                "Capping refeed attempts from %s to %s to prevent unbounded repair loops",
+                requested_attempts, max_attempts
+            )
+
         is_event_input_error = 'does not support event inputs' in error_message.lower() or 'expects only event inputs' in error_message.lower()
-        if is_event_input_error:
-            max_attempts = 999  # Effectively unlimited retries
-            logger.info("🔄 Event input error detected - will retry until successful")
-        
-        # Check if this is an "Invalid number of inputs" error - also retry indefinitely
-        is_input_count_error = ('invalid number of inputs' in error_message.lower() or 
-                               'should be exactly' in error_message.lower() or 
-                               'should be at least' in error_message.lower())
-        if is_input_count_error:
-            max_attempts = 999  # Effectively unlimited retries
-            logger.info("🔄 Invalid number of inputs error detected - will retry until successful")
-        
-        # Check if this is an "Unexpected character" error (missing comma) - also retry indefinitely
+        is_input_count_error = ('invalid number of inputs' in error_message.lower() or
+                                'should be exactly' in error_message.lower() or
+                                'should be at least' in error_message.lower())
         is_unexpected_char_error = 'unexpected character' in error_message.lower()
-        if is_unexpected_char_error:
-            max_attempts = 999  # Effectively unlimited retries
-            logger.info("🔄 Unexpected character error detected (likely missing comma) - will retry until successful")
-        
+
         attempt = 0
         while attempt < max_attempts:
             attempt += 1
+            attempt_template = current_template
+            attempt_error = error_message
             logger.info(f"🔄 Refeed attempt {attempt}/{max_attempts} for error: {error_message[:60]}")
             
             # Step 0: Apply database knowledge fixes FIRST (lookback, missing comma, unknown variable, event inputs, unknown operator)
@@ -916,7 +897,33 @@ FIXED EXPRESSION:"""
                 all_fixes.extend([f"DB: {f}" for f in db_fixes])
                 current_template = db_fixed
                 logger.info(f"🔧 Applied database knowledge fixes: {db_fixes}")
-            
+
+            # A remote BRAIN inaccessible/unknown-operator error is authoritative.
+            # If deterministic catalogue knowledge did not replace that operator,
+            # do not ask the LLM to rewrite the expression around the same invalid
+            # operator. That caused repeated 40-50 second calls with no progress.
+            if ("unknown operator" in error_message.lower() or
+                    ("inaccessible" in error_message.lower() and "operator" in error_message.lower())):
+                rejected_match = re.search(
+                    r'(?:unknown|inaccessible).*?operator\s+"?(\w+)',
+                    error_message,
+                    re.IGNORECASE,
+                )
+                if rejected_match:
+                    rejected_operator = rejected_match.group(1)
+                    operator_still_present = re.search(
+                        r'\b' + re.escape(rejected_operator) + r'\s*\(',
+                        current_template,
+                        re.IGNORECASE,
+                    )
+                    if operator_still_present:
+                        logger.error(
+                            "Stopping repair before Ollama: BRAIN rejected operator %s "
+                            "and no verified deterministic replacement is available",
+                            rejected_operator,
+                        )
+                        return None, all_fixes
+
             # Step 1: Fix "Invalid number of inputs" errors (CRITICAL - retry until success)
             if is_input_count_error:
                 logger.info("🔧 Applying fix for invalid number of inputs error...")
@@ -941,20 +948,37 @@ FIXED EXPRESSION:"""
             
             # Step 1.5: Fix event input errors by replacing operators (CRITICAL - retry until success)
             if is_event_input_error:
-                # ALWAYS use aggressive fix for event input errors to ensure ALL operators are replaced
-                logger.info("🔧 Applying aggressive event input fix to replace ALL incompatible operators...")
-                current_template = self._aggressive_event_input_fix(current_template, error_message, region)
-                all_fixes.append("Applied aggressive event input fix (replaced all incompatible operators)")
-                
-                # Also try targeted fix for the specific operator mentioned in error
+                # Only apply a replacement backed by explicit compatibility
+                # evidence. Never report a rewrite when the expression is unchanged.
+                logger.info("Checking for a verified event-input operator replacement...")
                 fixed_template, operator_fixes = self._fix_event_input_error(current_template, error_message, region)
                 if operator_fixes:
                     all_fixes.extend([f"EventInput: {f}" for f in operator_fixes])
                     current_template = fixed_template
                     logger.info(f"🔧 Also applied targeted fix: {operator_fixes}")
                 
-                # Learn this pattern
-                self._learn_event_input_compatibility(current_template, error_message)
+                # _fix_with_database_knowledge already records this incompatibility.
+                # Do not repeat the same database write or continue with an operator
+                # BRAIN has explicitly rejected.
+                operator_match = re.search(
+                    r'Operator\s+(\w+)\s+(?:does not support|expects only)\s+event inputs',
+                    error_message,
+                    re.IGNORECASE,
+                )
+                if operator_match:
+                    rejected_operator = operator_match.group(1)
+                    still_present = re.search(
+                        r'\b' + re.escape(rejected_operator) + r'\s*\(',
+                        current_template,
+                        re.IGNORECASE,
+                    )
+                    if still_present:
+                        logger.error(
+                            "Rejecting remote-invalid expression: no verified event-input-compatible "
+                            "replacement exists for operator %s. Skipping AI repair.",
+                            rejected_operator,
+                        )
+                        return None, all_fixes
             
             # Step 2: AST-based correction (only if AST is enabled)
             if self.use_ast and self.validator:
@@ -982,9 +1006,45 @@ FIXED EXPRESSION:"""
             # Step 4: Compiler validation (compiler working principle as code)
             compile_result = self.compile_template(current_template, optimize=False)
             if compile_result.success:
-                logger.info(f"✅ Refeed successful after {attempt} attempt(s) - template compiled")
-                # Learn from successful fix
-                self.learn_from_simulation_error(template, error_message, current_template)
+                # A locally valid expression is still invalid if it retains the
+                # exact operator that BRAIN rejected as inaccessible/unknown.
+                if ("unknown operator" in error_message.lower() or
+                        ("inaccessible" in error_message.lower() and "operator" in error_message.lower())):
+                    rejected_match = re.search(
+                    r'(?:unknown|inaccessible).*?operator\s+"?(\w+)',
+                        error_message,
+                        re.IGNORECASE,
+                    )
+                    if rejected_match:
+                        rejected_operator = rejected_match.group(1)
+                        if re.search(
+                            r'\b' + re.escape(rejected_operator) + r'\s*\(',
+                            current_template,
+                            re.IGNORECASE,
+                        ):
+                            logger.error(
+                                "Rejecting candidate: BRAIN reported operator %s as unknown/inaccessible, "
+                                "but the operator remains in the expression",
+                                rejected_operator,
+                            )
+                            return None, all_fixes
+
+                # A remote BRAIN error cannot be considered repaired merely because
+                # the local parser accepts the same expression. Require an actual
+                # expression change before returning a retry candidate.
+                if current_template.strip() == template.strip():
+                    logger.error(
+                        "Rejecting unchanged expression: local compilation passed, "
+                        "but the original expression still has the remote BRAIN error: %s",
+                        error_message[:160],
+                    )
+                    return None, all_fixes
+
+                logger.info(
+                    "Local compilation passed after %s attempt(s); candidate must be "
+                    "re-simulated by BRAIN before it is considered valid",
+                    attempt,
+                )
                 return current_template, all_fixes
             else:
                 # Compiler found errors, try again with new error info
@@ -1010,13 +1070,22 @@ FIXED EXPRESSION:"""
                         is_unexpected_char_error = True
                         logger.warning(f"⚠️ Still unexpected character error after fix, retrying with: {error_msg[:50]}")
                     else:
-                        # Different error - use it for next attempt
+                        # Different error - use it for next attempt and refresh error flags.
                         error_message = error_msg
-                        # Update error type flags
                         is_event_input_error = 'does not support event inputs' in error_msg.lower() or 'expects only event inputs' in error_msg.lower()
-                        is_input_count_error = ('invalid number of inputs' in error_msg.lower() or 
-                                               'should be exactly' in error_msg.lower() or 
-                                               'should be at least' in error_msg.lower())
+                        is_input_count_error = ('invalid number of inputs' in error_msg.lower() or
+                                                'should be exactly' in error_msg.lower() or
+                                                'should be at least' in error_msg.lower())
+                        is_unexpected_char_error = 'unexpected character' in error_msg.lower()
+
+                    # Stop immediately when neither the expression nor compiler error
+                    # changed. Repeating the same Ollama prompt cannot make progress.
+                    if current_template.strip() == attempt_template.strip() and error_message.strip().lower() == attempt_error.strip().lower():
+                        logger.error(
+                            "Stopping refeed: attempt %s made no progress (same expression and compiler error: %s)",
+                            attempt, error_message[:120]
+                        )
+                        break
                 else:
                     # Try traditional validation
                     is_valid, error_msg, _ = self.validate_template(current_template, region)
@@ -1057,62 +1126,18 @@ FIXED EXPRESSION:"""
             return set()
     
     def _aggressive_event_input_fix(self, template: str, error_message: str, region: str = None) -> str:
-        """Aggressively fix event input errors by replacing ALL incompatible operators (including arithmetic operators in expressions)"""
-        import re
-        
-        fixed_template = template
-        
-        # Replace ALL instances of incompatible operators with ts_* versions
-        # First pass: Replace function calls (operator(...))
-        function_replacements = [
-            (r'\badd\s*\(', 'ts_add('),
-            (r'\bsubtract\s*\(', 'ts_subtract('),
-            (r'\bmultiply\s*\(', 'ts_multiply('),
-            (r'\bdivide\s*\(', 'ts_divide('),
-            (r'\bpower\s*\(', 'ts_power('),
-            (r'\bsigned_power\s*\(', 'ts_signed_power('),
-            (r'\babs\s*\(', 'ts_abs('),
-            (r'\blog\s*\(', 'ts_log('),
-            (r'\bsqrt\s*\(', 'ts_sqrt('),
-            (r'\bmin\s*\(', 'ts_min('),
-            (r'\bmax\s*\(', 'ts_max('),
-            (r'\brank\s*\(', 'ts_rank('),
-            (r'\bdelta\s*\(', 'ts_delta('),
-            (r'\bcorrelation\s*\(', 'ts_correlation('),
-            (r'\breverse\s*\(', 'ts_reverse('),
-        ]
-        
-        # Apply function call replacements (multiple passes for nested cases)
-        for _ in range(5):
-            for pattern, replacement in function_replacements:
-                if re.search(pattern, fixed_template, re.IGNORECASE):
-                    fixed_template = re.sub(pattern, replacement, fixed_template, flags=re.IGNORECASE)
-        
-        # Second pass: Replace arithmetic operators in expressions (field1 + field2 -> ts_add(field1, field2))
-        # Only replace if both sides are field identifiers (not already in function calls)
-        # Pattern: field_id + field_id (but not inside function calls)
-        arithmetic_replacements = [
-            # Match: field_id + field_id (but be careful with parentheses)
-            (r'([a-z][a-z0-9_]{10,})\s*\+\s*([a-z][a-z0-9_]{10,})', r'ts_add(\1, \2)'),
-            (r'([a-z][a-z0-9_]{10,})\s*-\s*([a-z][a-z0-9_]{10,})', r'ts_subtract(\1, \2)'),
-            (r'([a-z][a-z0-9_]{10,})\s*\*\s*([a-z][a-z0-9_]{10,})', r'ts_multiply(\1, \2)'),
-            (r'([a-z][a-z0-9_]{10,})\s*/\s*([a-z][a-z0-9_]{10,})', r'ts_divide(\1, \2)'),
-        ]
-        
-        # Apply arithmetic replacements (multiple passes for nested expressions)
-        for _ in range(3):
-            for pattern, replacement in arithmetic_replacements:
-                if re.search(pattern, fixed_template, re.IGNORECASE):
-                    fixed_template = re.sub(pattern, replacement, fixed_template, flags=re.IGNORECASE)
-        
-        # Also handle standalone arithmetic operators (not in function calls)
-        # Replace: field1 + field2 (when not already in a function)
-        # This is tricky, so we'll do a simpler approach: replace all +, -, *, / between identifiers
-        # But we need to be careful not to break function calls
-        
-        logger.info(f"🔧 Aggressive fix applied: {template[:50]}... -> {fixed_template[:50]}...")
-        return fixed_template
-    
+        """Do not guess event-input replacements without verified BRAIN evidence.
+
+        The former regex-based rewrite changed arithmetic and function names
+        based only on a ts_* naming convention. That is not proof that the
+        replacement accepts event inputs or preserves expression semantics.
+        """
+        logger.warning(
+            "Skipping aggressive event-input rewrite: no verified replacement "
+            "catalogue is available for this expression"
+        )
+        return template
+
     def _fix_event_input_error(self, template: str, error_message: str, region: str = None) -> Tuple[str, List[str]]:
         """
         Fix event input errors by replacing incompatible operators
@@ -1142,25 +1167,10 @@ FIXED EXPRESSION:"""
             # Map of operators that don't support event inputs to replacements
             # Event input compatible operators: vec_*, ts_* (some), event-specific operators
             # Non-event operators: arithmetic (add, subtract, multiply, divide), cross-sectional (rank, winsorize, zscore)
-            event_input_replacements = {
-                'multiply': 'ts_multiply',  # Time series version
-                'add': 'ts_add',
-                'subtract': 'ts_subtract',
-                'divide': 'ts_divide',
-                'power': 'ts_power',
-                'signed_power': 'ts_signed_power',
-                'abs': 'ts_abs',
-                'log': 'ts_log',
-                'sqrt': 'ts_sqrt',
-                'min': 'ts_min',
-                'max': 'ts_max',
-                'rank': 'ts_rank',  # Time series rank instead of cross-sectional
-                'delta': 'ts_delta',
-                'correlation': 'ts_correlation',
-                'winsorize': 'ts_winsorize',  # Try ts_ version if exists
-                'zscore': 'ts_zscore',  # Try ts_ version
-                'reverse': 'ts_reverse',  # Time series reverse
-            }
+            # Do not infer compatibility from naming similarity (for example,
+            # add -> ts_add). A replacement is usable only after its signature
+            # and event-input support have been verified against BRAIN.
+            event_input_replacements = {}
             
             # Try to find replacement
             replacement = event_input_replacements.get(problematic_operator.lower())
@@ -1179,157 +1189,87 @@ FIXED EXPRESSION:"""
                     fixed_template = re.sub(pattern, replacement, fixed_template, flags=re.IGNORECASE)
                     fixes.append(f"Replaced {problematic_operator} with {replacement} (event input compatible)")
             else:
-                # No direct replacement - try wrapping with ts_* or using vec_* operators
-                # For arithmetic operators, try ts_* prefix
-                if problematic_operator in ['multiply', 'add', 'subtract', 'divide']:
-                    ts_version = 'ts_' + problematic_operator
-                    pattern = r'\b' + re.escape(problematic_operator) + r'\s*\('
-                    if re.search(pattern, fixed_template, re.IGNORECASE):
-                        fixed_template = re.sub(pattern, ts_version + '(', fixed_template, flags=re.IGNORECASE)
-                        fixes.append(f"Replaced {problematic_operator} with {ts_version} (event input compatible)")
-                else:
-                    # For cross-sectional operators, try removing or wrapping
-                    logger.warning(f"⚠️ No replacement found for {problematic_operator} with event inputs")
-                    fixes.append(f"Could not find replacement for {problematic_operator}")
-        
-        # If still no replacement found, try to identify event input fields and replace operators
-        if not fixes and region:
-            # Get event input fields for this region
-            event_fields = self._get_event_input_fields(region, delay=1)
-            
-            # Check if template uses event input fields
-            field_pattern = r'\b([a-z][a-z0-9_]{10,})\b'
-            template_fields = set(re.findall(field_pattern, template))
-            
-            if template_fields.intersection(event_fields) if event_fields else True:  # Assume true if unknown
-                # Template uses event inputs - replace all incompatible operators
-                logger.info(f"🔧 Template uses event input fields, replacing all incompatible operators")
-                fixed_template = self._aggressive_event_input_fix(template, error_message, region)
-                if fixed_template != template:
-                    fixes.append("Replaced all incompatible operators with ts_* versions for event inputs")
-                    return fixed_template, fixes
-        
+                # No evidence-backed replacement is available. In particular,
+                # do not infer that ts_<operator> accepts event inputs merely
+                # because its name resembles the rejected operator.
+                logger.warning(
+                    "No verified event-input replacement for operator %s; "
+                    "leaving expression unchanged",
+                    problematic_operator,
+                )
+
         return fixed_template, fixes
     
     def _learn_event_input_compatibility(self, template: str, error_message: str):
-        """Learn about event input compatibility from errors and store in database"""
+        """Persist incompatibility only when BRAIN explicitly names the operator."""
         import re
-        logger.info(f"📚 _learn_event_input_compatibility called for: {error_message[:100]}")
-        
-        # Extract operator and learn that it doesn't support event inputs
-        # Try multiple patterns to catch different error message formats
-        operator_match = re.search(r'Operator\s+(\w+)\s+(?:does not support|expects only)\s+event inputs', error_message, re.IGNORECASE)
+
+        logger.info(
+            "Learning event-input compatibility from BRAIN error: %s",
+            error_message[:160],
+        )
+        operator_match = re.search(
+            r"(?:Operator\s+)?([A-Za-z_][A-Za-z0-9_]*)\s+"
+            r"(?:does\s+not\s+support|expects\s+only)\s+event\s+inputs",
+            error_message,
+            re.IGNORECASE,
+        )
         if not operator_match:
-            operator_match = re.search(r'(\w+)\s+(?:does not support|expects only)\s+event inputs', error_message, re.IGNORECASE)
-        if not operator_match:
-            # Try pattern: "Operator X does not support event inputs" or "X does not support event inputs"
-            operator_match = re.search(r'(?:Operator\s+)?(\w+)\s+does\s+not\s+support\s+event\s+inputs', error_message, re.IGNORECASE)
-        if not operator_match:
-            # Try pattern: "Operator X expects only event inputs"
-            operator_match = re.search(r'(?:Operator\s+)?(\w+)\s+expects\s+only\s+event\s+inputs', error_message, re.IGNORECASE)
-        
-        if operator_match:
-            logger.info(f"📚 Found operator match: {operator_match.group(1)}")
-            operator_name = operator_match.group(1).lower()
-            
-            # Store in parser's knowledge base (in-memory) - only if AST is enabled
+            logger.warning(
+                "Not learning event-input incompatibility: BRAIN error did not "
+                "identify a specific operator. Expression operators will not "
+                "be guessed. Error: %s",
+                error_message[:160],
+            )
+            return
+
+        operator_name = operator_match.group(1).lower()
+        if self.use_ast and self.parser:
+            self.parser.event_input_incompatible_operators.add(operator_name)
+
+        try:
+            from ..storage.backtest_storage import BacktestStorage
+
+            storage = BacktestStorage(self.db_path)
+            ast_pattern = None
             if self.use_ast and self.parser:
-                if not hasattr(self.parser, 'event_input_incompatible_operators'):
-                    self.parser.event_input_incompatible_operators = set()
-                self.parser.event_input_incompatible_operators.add(operator_name)
-            
-            # Store in database for persistence (always, regardless of AST setting)
-            try:
-                from ..storage.backtest_storage import BacktestStorage
-                storage = BacktestStorage(self.db_path)
-                
-                # Extract replacement operator if available
-                replacement = None
-                if hasattr(self, '_fix_event_input_error'):
-                    # Check replacement mapping
-                    event_input_replacements = {
-                        'multiply': 'ts_multiply',
-                        'add': 'ts_add',
-                        'subtract': 'ts_subtract',
-                        'divide': 'ts_divide',
-                        'rank': 'ts_rank',
-                        'power': 'ts_power',
-                        'signed_power': 'ts_signed_power',
-                        'abs': 'ts_abs',
-                        'log': 'ts_log',
-                        'sqrt': 'ts_sqrt',
-                        'min': 'ts_min',
-                        'max': 'ts_max',
-                        'delta': 'ts_delta',
-                        'correlation': 'ts_correlation',
-                        'reverse': 'ts_reverse',
-                        'negative_colocation': None,  # No direct replacement
-                    }
-                    replacement = event_input_replacements.get(operator_name)
-                
-                # Extract AST pattern from template (only if AST is enabled)
-                ast_pattern = None
-                if self.use_ast and self.parser:
-                    try:
-                        ast, _ = self.parser.parse(template)
-                        if ast:
-                            ast_pattern = self._extract_ast_structure(ast)
-                    except:
-                        pass
-                
-                logger.info(f"📚 Calling store_compiler_knowledge for operator: {operator_name}, replacement: {replacement}")
-                logger.info(f"📚 Database path: {self.db_path}")
-                
-                result = storage.store_compiler_knowledge(
-                    knowledge_type='event_input_incompatible',
-                    operator_name=operator_name,
-                    compatibility_status='incompatible',
-                    error_message=error_message,
-                    learned_from_template=template,
-                    learned_from_error=error_message,
-                    replacement_operator=replacement,
-                    ast_pattern=ast_pattern,
-                    compiler_rule=f"Operator {operator_name} does not support event inputs. Use {replacement} instead." if replacement else f"Operator {operator_name} does not support event inputs.",
-                    metadata={'learned_at': time.time()}
-                )
-                
-                if result:
-                    logger.info(f"✅ Successfully stored compiler knowledge: {operator_name} does not support event inputs (replacement: {replacement})")
-                else:
-                    logger.error(f"❌ store_compiler_knowledge returned False for operator: {operator_name}")
-            except Exception as e:
-                logger.error(f"❌ Failed to store compiler knowledge: {e}", exc_info=True)
-                logger.error(f"❌ Database path was: {self.db_path}")
-        else:
-            # Even if we can't extract operator name, store the error for learning
-            logger.warning(f"⚠️ Could not extract operator name from error message: {error_message[:100]}")
-            # Try to extract any operator name from the template
-            import re
-            operators_in_template = re.findall(r'\b([a-z_]+)\s*\(', template.lower())
-            if operators_in_template:
-                # Store knowledge for the first operator found
-                operator_name = operators_in_template[0]
-                logger.info(f"📚 Using first operator from template: {operator_name}")
                 try:
-                    from ..storage.backtest_storage import BacktestStorage
-                    storage = BacktestStorage(self.db_path)
-                    result = storage.store_compiler_knowledge(
-                        knowledge_type='event_input_incompatible',
-                        operator_name=operator_name,
-                        compatibility_status='incompatible',
-                        error_message=error_message,
-                        learned_from_template=template,
-                        learned_from_error=error_message,
-                        replacement_operator=None,
-                        ast_pattern=None,
-                        compiler_rule=f"Operator {operator_name} may not support event inputs (extracted from template)",
-                        metadata={'learned_at': time.time(), 'extracted_from_template': True}
-                    )
-                    if result:
-                        logger.info(f"✅ Stored compiler knowledge (extracted operator): {operator_name}")
-                except Exception as e:
-                    logger.error(f"❌ Failed to store compiler knowledge (extracted): {e}", exc_info=True)
-    
+                    ast, _ = self.parser.parse(template)
+                    if ast:
+                        ast_pattern = self._extract_ast_structure(ast)
+                except Exception:
+                    logger.debug("Could not extract AST for event-input evidence", exc_info=True)
+
+            result = storage.store_compiler_knowledge(
+                knowledge_type="event_input_incompatible",
+                operator_name=operator_name,
+                compatibility_status="incompatible",
+                error_message=error_message,
+                learned_from_template=template,
+                learned_from_error=error_message,
+                replacement_operator=None,
+                ast_pattern=ast_pattern,
+                compiler_rule=(
+                    f"Operator {operator_name} does not support event inputs."
+                ),
+                metadata={
+                    "learned_at": time.time(),
+                    "evidence_source": "explicit_brain_error",
+                },
+            )
+            if result:
+                logger.info(
+                    "Stored BRAIN-confirmed event-input restriction for %s",
+                    operator_name,
+                )
+            else:
+                logger.error(
+                    "Could not persist BRAIN-confirmed event-input restriction for %s",
+                    operator_name,
+                )
+        except Exception:
+            logger.exception("Failed to persist event-input compatibility evidence")
+
     def _extract_ast_structure(self, ast) -> str:
         """Extract AST structure as string representation"""
         if not ast:
@@ -1377,13 +1317,13 @@ FIXED EXPRESSION:"""
             logger.info(f"📚 Detected event input error - calling _learn_event_input_compatibility")
             self._learn_event_input_compatibility(template, error_message)
         
-        # Try to generate a fix if not provided
+        # Learning from a remote BRAIN rejection must be observation-only.
+        # Repair is handled by refeed_with_correction(), which has the context
+        # needed to verify deterministic replacements. Calling fix_template()
+        # here could launch a second Ollama repair for the same rejected alpha,
+        # create duplicate learning records, and bypass the early-stop guard.
         if not fixed_template:
-            try:
-                fixed_template, _ = self.fix_template(template, error_message)
-            except Exception as e:
-                logger.debug(f"Error generating fix in learn_from_simulation_error: {e}")
-                fixed_template = template  # Use original template if fix generation fails
+            fixed_template = template
         
         # Learn from the error (stores to JSON file) - only if AST is enabled
         if self.use_ast and self.corrector:
@@ -1478,13 +1418,20 @@ FIXED EXPRESSION:"""
             CompilationResult with all compilation stages
         """
         if not self.use_ast or not self.compiler:
-            # Return a mock result if AST is disabled
+            # Never report success when no real compiler validation was performed.
             from .expression_compiler import CompilationResult, CompilerStage
+            logger.error(
+                "Strict compilation unavailable (use_ast=%s, compiler_available=%s); rejecting expression",
+                self.use_ast,
+                self.compiler is not None,
+            )
             return CompilationResult(
-                success=True,
+                success=False,
                 source_code=template,
-                final_expression=template,
-                stage_reached=CompilerStage.CODE_GEN
+                final_expression=None,
+                errors=[],
+                warnings=["Strict FASTEXPR compiler is disabled or unavailable; expression was not validated."],
+                stage_reached=CompilerStage.LEXICAL,
             )
         return self.compiler.compile(template, optimize=optimize)
     
@@ -1526,15 +1473,36 @@ FIXED EXPRESSION:"""
             expected = int(input_count_match.group(2))
         
         if expected is not None and actual is not None:
-            logger.info(f"🔧 Fixing input count: operator has {actual} inputs, needs {expected}")
+            # BRAIN often returns only the input counts, without naming the
+            # offending operator. Never strip arguments from every call that
+            # happens to have the same arity: nested calls may legitimately need
+            # those arguments (for example, a time-series lookback).
+            named_operator = re.search(
+                r'\b(?:operator|function)\s+["\']?([a-z_][a-z0-9_]*)',
+                error_message,
+                re.IGNORECASE,
+            )
+            if not named_operator:
+                logger.warning(
+                    "Cannot safely repair generic input-count error: BRAIN did not identify the offending operator; leaving expression unchanged"
+                )
+                return template, []
+
+            target_operator = named_operator.group(1).lower()
+            logger.info(
+                "🔧 Fixing input count for BRAIN-identified operator %s: %s -> %s",
+                target_operator, actual, expected
+            )
             
-            # Find operators in template that might have wrong parameter count
+            # Find only the operator named by BRAIN, not unrelated nested calls
             # Pattern: operator_name(param1, param2, ...)
             operator_pattern = r'\b([a-z_]+)\s*\('
             operators = re.finditer(operator_pattern, fixed_template, re.IGNORECASE)
             
             for op_match in operators:
                 op_name = op_match.group(1)
+                if op_name.lower() != target_operator:
+                    continue
                 op_start = op_match.start()
                 
                 # Find the matching closing parenthesis
@@ -1596,33 +1564,13 @@ FIXED EXPRESSION:"""
                             break
                     i += 1
         
-        # If no specific fix found, try prompt engineering approach
+        # Do not ask the LLM to invent defaults for an operator signature.
+        # If the identified call cannot be repaired from explicit arity evidence,
+        # leave it unchanged for manual/catalogue-backed handling.
         if not fixes and self.ollama_manager:
-            logger.info("🔧 Trying prompt engineering for input count fix...")
-            prompt = f"""Fix this FASTEXPR expression that has wrong number of operator parameters:
+            logger.warning("Skipping AI arity repair: no verified operator signature is available")
+            return template, []
 
-ERROR: {error_message}
-EXPRESSION: {template}
-
-The operator has the wrong number of inputs. Fix it by:
-1. If it says "should be exactly 1 input(s)" but has 2, remove the extra parameter
-2. If it says "should be exactly 2 input(s)" but has 1, add a default parameter (like 1 or 0)
-3. Keep the operator name and first parameter, adjust others
-
-Return ONLY the fixed expression, no explanations:"""
-            
-            try:
-                response = self.ollama_manager.generate(prompt, max_tokens=300)
-                if response:
-                    fixed = self._extract_expression_from_response(response)
-                    if fixed and fixed != template:
-                        fixed_template = fixed
-                        fixes.append("Prompt engineering fix for input count")
-                        logger.info(f"🔧 Prompt engineering fixed input count: {fixed[:50]}...")
-            except Exception as e:
-                logger.debug(f"Prompt engineering for input count failed: {e}")
-                # fixed_template already set to template at the beginning, so no need to set it again
-        
         return fixed_template, fixes
     
     def get_validation_stats(self) -> Dict:
@@ -1792,7 +1740,9 @@ Return ONLY the fixed expression, no explanations:"""
         
         # Extract operator name from error message
         # Pattern: "Attempted to use inaccessible or unknown operator 'X'"
-        op_match = re.search(r"unknown operator ['\"]?(\w+)['\"]?", error_message, re.IGNORECASE)
+        op_match = re.search(r"unknown operator\s*:\s*['\"]?(\w+)['\"]?", error_message, re.IGNORECASE)
+        if not op_match:
+            op_match = re.search(r"unknown operator ['\"]?(\w+)['\"]?", error_message, re.IGNORECASE)
         if not op_match:
             op_match = re.search(r"inaccessible.*operator ['\"]?(\w+)['\"]?", error_message, re.IGNORECASE)
         if not op_match:
@@ -1822,6 +1772,8 @@ Return ONLY the fixed expression, no explanations:"""
                     'max': 'ts_max',
                     'min': 'ts_min',
                     'std': 'ts_std',
+                    # BRAIN exposes power(x, y), not a ts_power time-series variant.
+                    'ts_power': 'power',
                 }
                 
                 replacement = replacements.get(unknown_op.lower())

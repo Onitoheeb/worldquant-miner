@@ -34,17 +34,33 @@ class AlgorithmicTemplateGenerator:
     Generates placeholder expressions algorithmically, then uses Ollama to select indices
     """
     
-    def __init__(self, operators: List[Dict], data_fields: List[Dict]):
+    def __init__(self, operators: List[Dict], data_fields: List[Dict], alpha_type: str = "REGULAR"):
         """
-        Initialize algorithmic template generator
-        
-        Args:
-            operators: List of operator dicts from operatorRAW.json
-            data_fields: List of data field dicts
+        Initialize the generator with operators eligible for the active BRAIN alpha type.
         """
         self.operators = operators
         self.data_fields = data_fields
+        self.alpha_type = (alpha_type or "REGULAR").upper()
         self.operator_metadata = self._extract_operator_metadata(operators)
+
+    @staticmethod
+    def _count_placeholder_arguments(expression: str, placeholder: str) -> int:
+        """Count top-level arguments supplied to a function placeholder."""
+        match = re.search(r'\b' + re.escape(placeholder) + r'\s*\(', expression, re.IGNORECASE)
+        if not match:
+            return 1
+        depth = 1
+        commas = 0
+        for char in expression[match.end():]:
+            if char == '(':
+                depth += 1
+            elif char == ')':
+                depth -= 1
+                if depth == 0:
+                    return commas + 1
+            elif char == ',' and depth == 1:
+                commas += 1
+        return commas + 1
         
     def _extract_operator_metadata(self, operators: List[Dict]) -> Dict[str, OperatorMetadata]:
         """Extract metadata from operators"""
@@ -324,7 +340,8 @@ class AlgorithmicTemplateGenerator:
         placeholder_expression: str,
         available_operators: List[Dict],
         available_fields: List[Dict],
-        recently_used_fields: List[str] = None  # New: fields to avoid
+        recently_used_fields: List[str] = None,  # Fields to avoid
+        alpha_type: str = None
     ) -> str:
         """
         Generate prompt for Ollama to select operators/fields by index
@@ -352,8 +369,33 @@ class AlgorithmicTemplateGenerator:
         num_operators_needed = len(unique_operator_placeholders)
         num_fields_needed = len(unique_field_placeholders)
         
-        # Randomly shuffle operators and fields for diversity
-        operator_indices = list(range(len(available_operators)))
+        # Only offer operators valid for this alpha type and every placeholder's
+        # actual argument count. The compiler remains the final authority.
+        active_alpha_type = (alpha_type or self.alpha_type or "REGULAR").upper()
+        placeholder_arities = {
+            placeholder: self._count_placeholder_arguments(placeholder_expression, placeholder)
+            for placeholder in unique_operator_placeholders
+        }
+        eligible_operator_indices = []
+        for actual_idx, op in enumerate(available_operators):
+            name = op.get('name', '')
+            metadata = self.operator_metadata.get(name)
+            if not name or not metadata:
+                continue
+            # Vector operators require VECTOR-typed inputs. The current placeholder
+            # selector chooses field placeholders independently of AST argument
+            # types, so admitting vec_* here creates invalid MATRIX/VECTOR pairings.
+            # Keep these out until selection is type-directed at each AST leaf.
+            if name.lower().startswith('vec_'):
+                continue
+            scopes = {str(scope).upper() for scope in (metadata.scope or [])}
+            if scopes and active_alpha_type not in scopes:
+                continue
+            if any(metadata.min_inputs > arity for arity in placeholder_arities.values()):
+                continue
+            eligible_operator_indices.append(actual_idx)
+
+        operator_indices = eligible_operator_indices[:]
         random.shuffle(operator_indices)
         field_indices = list(range(len(available_fields)))
         random.shuffle(field_indices)
@@ -460,14 +502,14 @@ REQUIRED OPERATOR PLACEHOLDERS (you MUST select all {num_operators_needed}):
 REQUIRED FIELD PLACEHOLDERS (you MUST select all {num_fields_needed}):
 {field_placeholder_list}
 
-CRITICAL RULES:
-1. ONLY return index numbers (like 0, 5, 12, 23) - DO NOT write operator names or field names
-2. Use UPPERCASE placeholder names as keys: OPERATOR1, OPERATOR2, DATA_FIELD1, DATA_FIELD2
-3. You MUST include ALL placeholders listed above in your JSON response - missing any placeholder will cause an error
-4. Map each placeholder to an INDEX NUMBER from the lists below
-5. Select DIFFERENT field indices for different DATA_FIELD placeholders when possible
-6. **PRIORITIZE DIVERSITY**: Choose fields that are different from recently used ones - avoid repetitive selections
-7. If an operator shows "at least N" inputs, the template structure should already provide enough inputs
+STRICT OUTPUT CONTRACT (follow exactly):
+1. Return exactly ONE valid JSON object. No markdown fences, prose, comments, or trailing text.
+2. The only permitted top-level keys are "operators" and "fields".
+3. Under "operators", include EVERY required operator placeholder, spelled exactly as listed, as a key.
+4. Under "fields", include EVERY required field placeholder, spelled exactly as listed, as a key.
+5. Every value MUST be an integer index that appears in the corresponding available list. Never return an operator name, field name, category, or invented key.
+6. Do not omit a required key. Do not add keys that are not required.
+7. Select distinct field indices where possible.
 
 AVAILABLE OPERATORS (randomly shuffled - select by INDEX number in brackets):
 {chr(10).join(operator_list)}
@@ -487,6 +529,12 @@ Example: If you want to select the field at [3] for DATA_FIELD1, return "DATA_FI
 
 ONLY return the JSON with index numbers. DO NOT generate operator names or field names."""
         
+        if unique_operator_placeholders and not operator_mapping:
+            logger.warning(
+                "No operators satisfy alpha_type=%s and placeholder arities=%s",
+                active_alpha_type, placeholder_arities
+            )
+
         # Store mappings for later use in replacement
         self._last_operator_mapping = operator_mapping
         self._last_field_mapping = field_mapping

@@ -29,9 +29,23 @@ The consolidated documentation includes:
 - **Continuous Mining**: Automated 24/7 alpha discovery with error correction
 - **Cyberpunk GUI**: Modern graphical interface for system control
 - **Smart Ollama Integration**: Local LLM with automatic fallback
-- **Template Validation**: Self-correcting AST with error learning
+- **Template Validation**: Strict FASTEXPR AST/compiler validation with evidence-based error learning
+- **Autonomous Research Memory**: Persistent SQLite memory of BRAIN experiments, hypotheses, operator/field catalogues, correlations, and failure lessons
+- **LLM-led Alpha Research**: Step 4 proposes complete expressions from measured research seeds and current BRAIN metadata, then requires local compilation before simulation
 - **Expression Compiler**: Multi-stage compilation pipeline
 - **Quality Monitoring**: Performance tracking and degradation detection
+
+## 🧠 Research Feedback Loop
+
+Generation Two now maintains research memory in the configured backtest SQLite database.
+
+1. Step 4 snapshots the available BRAIN operators and data fields, including their metadata.
+2. When Ollama is available, the research path asks the LLM to propose a complete expression using exact catalogue names and historical experiment context.
+3. A candidate must pass local FASTEXPR compilation before it is queued for Step 5.
+4. Step 5 records the observed BRAIN simulation outcome, including performance metrics, checks, and available correlation data.
+5. Later research prompts retrieve diverse historical candidates and recent failure lessons.
+
+This is persistent retrieval-based learning, not automatic model-weight retraining. A locally compiled expression is not considered proven until BRAIN simulation supplies the evidence. The existing algorithmic placeholder generator remains the fallback when Ollama is unavailable or its candidate fails compilation.
 
 ## 🏗️ Architecture
 

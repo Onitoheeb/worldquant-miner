@@ -32,7 +32,8 @@ class MiningEngine:
         search_strategy_manager,
         sim_counter,
         log_callback: Optional[Callable[[str], None]] = None,
-        update_slot_callback: Optional[Callable] = None
+        update_slot_callback: Optional[Callable] = None,
+        update_counter_callback: Optional[Callable] = None
     ):
         """
         Initialize mining engine
@@ -59,9 +60,11 @@ class MiningEngine:
         self.sim_counter = sim_counter
         self.log_callback = log_callback
         self.update_slot_callback = update_slot_callback
+        self.update_counter_callback = update_counter_callback
         
         self.mining_active = False
         self.stop_flag = False
+        self.stop_event = threading.Event()
         self.generated_templates_queue = []
         self.error_recovery_count = 0
         self.max_error_recovery = 10  # Max consecutive errors before pause
@@ -81,6 +84,7 @@ class MiningEngine:
         
         self.mining_active = True
         self.stop_flag = False
+        self.stop_event.clear()
         self.error_recovery_count = 0
         
         # Start main loop
@@ -93,7 +97,8 @@ class MiningEngine:
         """Stop mining engine"""
         self.mining_active = False
         self.stop_flag = True
-        self._log("⏹ Mining engine stopping...")
+        self.stop_event.set()
+        self._log("⏹ Mining engine stopping; no new simulations will be started. In-flight BRAIN jobs will finish monitoring.")
     
     def _main_loop(self):
         """Main mining loop with error recovery and long-term operation support"""
@@ -107,8 +112,8 @@ class MiningEngine:
                 
                 # Check simulation limit
                 if not self.sim_counter.can_simulate():
-                    self._log("⚠️ Daily simulation limit reached. Waiting...")
-                    time.sleep(3600)
+                    self._log("⚠️ Daily simulation limit reached. Waiting (stop remains responsive)...")
+                    self.stop_event.wait(3600)
                     continue
                 
                 # Process simulations (now handles generation internally with 20/80 logic)
@@ -117,7 +122,7 @@ class MiningEngine:
                 # Reset error recovery on success
                 self.error_recovery_count = 0
                 
-                time.sleep(1)
+                self.stop_event.wait(1)
                 
             except Exception as e:
                 self.error_recovery_count += 1
@@ -129,85 +134,146 @@ class MiningEngine:
                 
                 if self.error_recovery_count >= self.max_error_recovery:
                     self._log(f"⚠️ Too many errors, pausing for {backoff_time} seconds...")
-                    time.sleep(backoff_time)
+                    self.stop_event.wait(backoff_time)
                     self.error_recovery_count = 0
                 else:
-                    time.sleep(backoff_time)
+                    self.stop_event.wait(backoff_time)
     
     def _generate_new_template_for_mining(self) -> tuple:
-        """
-        Generate a new placeholder template that's different from database
-        
-        Returns:
-            (template, region) tuple or (None, None) if failed
+        """Generate a research-led, concrete FASTEXPR candidate.
+
+        Stage 6 must not submit random placeholder trees as if they were alpha
+        hypotheses. Generate against the active BRAIN catalogue and measured
+        research memory, then require strict local compilation before storing.
         """
         try:
             region = self.search_strategy.get_next_region()
-            if not region:
+            if not region or not self.generator or not self.generator.template_generator:
                 return (None, None)
-            
-            # Use algorithmic generation (like Step 4) - generates placeholders
-            from generation_two.core.algorithmic_template_generator import AlgorithmicTemplateGenerator
-            
-            available_operators = self.generator.template_generator.operator_fetcher.operators if self.generator.template_generator.operator_fetcher else None
-            available_fields = self.generator.template_generator.get_data_fields_for_region(region)
-            
-            if not available_operators or not available_fields:
-                logger.warning(f"No operators or fields available for {region}")
+
+            template_generator = self.generator.template_generator
+            operators = (
+                template_generator.operator_fetcher.operators
+                if template_generator.operator_fetcher else []
+            )
+            fields = template_generator.get_data_fields_for_region(region) or []
+            validator = getattr(template_generator, "template_validator", None)
+            ollama = getattr(template_generator, "ollama_manager", None)
+
+            if not operators or not fields or not validator or not getattr(validator, "use_ast", False):
+                self._log(f"⚠️ {region}: No strict compiler/catalogue available; skipping ungrounded candidate.")
                 return (None, None)
-            
-            # Generate placeholder template algorithmically
-            generator = AlgorithmicTemplateGenerator(available_operators, available_fields)
-            
-            # Try up to 10 times to generate a template different from database
-            max_retries = 10
-            for retry in range(max_retries):
-                template_with_placeholders = generator.generate_placeholder_expression(
-                    max_operators=5,
-                    method='random'  # Can be 'random', 'brownian', 'tree', 'linear'
-                )
-                
-                if not template_with_placeholders:
+
+            if not ollama or not getattr(ollama, "is_available", False):
+                self._log(f"⚠️ {region}: Research LLM unavailable; waiting for compiled Step 4 candidates.")
+                return (None, None)
+
+            research_memory = getattr(template_generator, "research_memory", None)
+            research_context = (
+                research_memory.build_evolution_prompt(region, count=1)
+                if research_memory else
+                f"Develop one distinct, testable quantitative alpha hypothesis for {region}."
+            )
+
+            # Supply actual catalogue entries; asking a model to use a catalogue
+            # without showing it one encourages invented fields/operators.
+            operator_lines = []
+            for item in operators[:100]:
+                name = str(item.get("name", "")).strip()
+                if not name:
                     continue
-                
-                # Check if different from database
-                if self.backtest_storage:
-                    existing_templates = self.backtest_storage.get_all_templates(region=region, limit=1000)
-                    if template_with_placeholders not in existing_templates:
-                        # Check duplicates
-                        is_dup, reason = self.duplicate_detector.is_duplicate(template_with_placeholders, region)
-                        if not is_dup:
-                            # Store in database
-                            from generation_two.core import template_similarity
-                            similarity_checker = template_similarity.TemplateSimilarityChecker()
-                            operators_used = list(similarity_checker.extract_operators(template_with_placeholders))
-                            fields_used = list(similarity_checker.extract_fields(template_with_placeholders))
-                            
-                            self.backtest_storage.store_template(
-                                template=template_with_placeholders,
-                                region=region,
-                                operators_used=operators_used,
-                                fields_used=fields_used
-                            )
-                            
-                            self.templates_generated_count += 1
-                            return (template_with_placeholders, region)
-                    else:
-                        logger.debug(f"Generated template already exists in database, retrying...")
-                else:
-                    # No database, just check duplicates
-                    is_dup, reason = self.duplicate_detector.is_duplicate(template_with_placeholders, region)
-                    if not is_dup:
-                        self.templates_generated_count += 1
-                        return (template_with_placeholders, region)
-            
-            logger.debug(f"Could not generate unique template after {max_retries} retries")
-            return (None, None)
-                    
+                definition = str(item.get("definition", "")).strip()
+                scope = ", ".join(str(x) for x in (item.get("scope") or []))
+                operator_lines.append(f"- {name}: {definition} [scope: {scope}]")
+            field_lines = []
+            for item in fields[:120]:
+                field_id = str(item.get("id", "")).strip()
+                if not field_id:
+                    continue
+                description = str(item.get("description", "")).strip()
+                field_lines.append(f"- {field_id}: {description[:180]}")
+
+            prompt = (
+                f"{research_context}\n\n"
+                f"ACTIVE REGION: {region}; ALPHA TYPE: REGULAR; DELAY: 1.\n"
+                "AVAILABLE OPERATORS (use only these exact names):\n"
+                + "\n".join(operator_lines)
+                + "\n\nAVAILABLE DATA FIELDS (use only these exact IDs):\n"
+                + "\n".join(field_lines)
+                + "\n\nRESEARCH TASK: Form one economically interpretable hypothesis. "
+                "Use a meaningful relationship between fields, not a random nesting "
+                "of operators. Prefer a distinct hypothesis from the historical seeds. "
+                "Return exactly one FASTEXPR expression, without markdown, explanation, "
+                "placeholders, invented identifiers, or alternatives. The expression "
+                "must be syntactically valid for the listed operator signatures."
+            )
+
+            candidate = template_generator.generate_template_from_prompt(
+                prompt, region=region, use_ollama=True
+            )
+            if not candidate:
+                return (None, None)
+
+            candidate = candidate.strip().strip("`").strip()
+            if "\n" in candidate:
+                candidate = next(
+                    (line.strip().strip("`") for line in candidate.splitlines()
+                     if line.strip() and not line.strip().startswith(("#", "//"))),
+                    ""
+                )
+            import re
+            if not candidate or re.search(r"\b(?:OPERATOR|DATA_FIELD)\d+\b", candidate, re.IGNORECASE):
+                self._log(f"⚠️ {region}: LLM returned an unresolved or empty candidate; rejecting.")
+                return (None, None)
+
+            compile_result = validator.compile_template(candidate, optimize=False)
+            if not compile_result or not compile_result.success:
+                errors = [
+                    getattr(error, "message", str(error))
+                    for error in (getattr(compile_result, "errors", None) or [])
+                ]
+                self._log(f"⚠️ {region}: Candidate failed strict compilation; rejected ({'; '.join(errors[:2])}).")
+                return (None, None)
+
+            candidate = compile_result.final_expression or candidate
+            if re.search(r"\b(?:OPERATOR|DATA_FIELD)\d+\b", candidate, re.IGNORECASE):
+                return (None, None)
+
+            if self.backtest_storage:
+                existing = set(self.backtest_storage.get_all_templates(region=region, limit=1000))
+                if candidate in existing:
+                    self._log(f"♻️ {region}: Research candidate already exists; skipping duplicate.")
+                    return (None, None)
+
+            is_duplicate, reason = self.duplicate_detector.is_duplicate(candidate, region)
+            if is_duplicate:
+                self._log(f"♻️ {region}: Research candidate rejected as duplicate ({reason}).")
+                return (None, None)
+
+            if self.backtest_storage:
+                from generation_two.core import template_similarity
+                checker = template_similarity.TemplateSimilarityChecker()
+                self.backtest_storage.store_template(
+                    template=candidate,
+                    region=region,
+                    operators_used=list(checker.extract_operators(candidate)),
+                    fields_used=list(checker.extract_fields(candidate))
+                )
+
+            self.templates_generated_count += 1
+            if research_memory:
+                research_memory.record_hypothesis(
+                    research_context, region, status="candidate_compiled",
+                    supporting_evidence=candidate
+                )
+            self._log(f"🧪 {region}: Research-led candidate compiled and stored; BRAIN simulation still required.")
+            return (candidate, region)
+
         except Exception as e:
-            logger.debug(f"Error generating template: {e}")
+            logger.warning("Research-led Stage 6 candidate generation failed: %s", e, exc_info=True)
+            self._log(f"⚠️ Research-led candidate generation failed: {str(e)[:100]}")
             return (None, None)
-    
+
     def _pick_unsimulated_template_from_db(self) -> tuple:
         """
         Pick a random unsimulated template from database
@@ -233,6 +299,12 @@ class MiningEngine:
                 # Filter out templates currently being simulated (check slot manager)
                 available_templates = []
                 for template, template_region in unsimulated:
+                    # Placeholder-only templates are scaffolds, not candidates.
+                    # Stage 6 should mine concrete Step 4 research expressions only.
+                    import re
+                    if re.search(r"\b(?:OPERATOR|DATA_FIELD)\d+\b", template or "", re.IGNORECASE):
+                        continue
+
                     # Check if this template is currently in any slot
                     is_in_use = False
                     for slot_id in range(8):
@@ -299,7 +371,17 @@ class MiningEngine:
         
         if not selected_templates:
             return
-        
+
+        # Avoid selecting the same unsimulated DB row more than once in this batch.
+        unique_templates = []
+        seen_in_batch = set()
+        for template, region in selected_templates:
+            key = (template, region)
+            if key not in seen_in_batch:
+                seen_in_batch.add(key)
+                unique_templates.append((template, region))
+        selected_templates = unique_templates
+
         # Select low-correlation templates from selected batch
         if len(selected_templates) > 1:
             low_corr_templates = self.correlation_tracker.get_low_correlation_templates(
@@ -315,48 +397,52 @@ class MiningEngine:
             if self.stop_flag:
                 break
             
-            # Check simulation limit
-            status = self.sim_counter.increment_count()
-            if not status['can_simulate']:
+            # Count only accepted BRAIN submissions, not selected templates.
+            if not self.sim_counter.can_simulate():
                 self._log("⚠️ Daily simulation limit reached")
                 break
             
-            # Assign slot (GLB uses 2 slots)
-            slot_count = 2 if region == 'GLB' else 1
-            slot_ids = self.slot_manager.find_available_slots(slot_count)
-            
-            if not slot_ids:
-                # Wait for slots
-                wait_count = 0
-                while wait_count < 10 and not self.stop_flag:
-                    time.sleep(2)
-                    wait_count += 1
-                    slot_ids = self.slot_manager.find_available_slots(slot_count)
-                    if slot_ids:
-                        break
-                
-                if not slot_ids:
-                    self._log(f"⚠️ No slots available for {region}")
-                    continue
-            
-            # Assign slots
+            # Reserve slots atomically. If none fit (for example, a GLB job
+            # needs two adjacent slots), leave the remaining work for the next loop.
             assigned_slots = self.slot_manager.assign_slot(template, region, 0)
             if not assigned_slots:
-                continue
-            
-            # Start simulation in thread
-            for slot_id in assigned_slots:
-                thread = threading.Thread(
-                    target=self._run_simulation,
-                    args=(slot_id, template, region),
-                    daemon=True
-                )
-                thread.start()
+                self._log(f"⏳ No available slot block for {region}; retrying on next cycle")
+                break
+
+            # Start one worker per expression, not one worker per visual slot.
+            # GLB reserves two visual slots but represents one BRAIN submission.
+            thread = threading.Thread(
+                target=self._run_simulation,
+                args=(assigned_slots, template, region),
+                daemon=True,
+                name=f"MiningSimulation-{region}"
+            )
+            thread.start()
             
             time.sleep(0.5)  # Brief pause between submissions
     
-    def _run_simulation(self, slot_id: int, template: str, region: str):
-        """Run a single simulation with placeholder replacement"""
+    @staticmethod
+    def _meets_metric_gates(result) -> bool:
+        """Apply metric gates; correlation review remains a separate qualification step."""
+        if not result or not getattr(result, "success", False) or not getattr(result, "alpha_id", ""):
+            return False
+        try:
+            sharpe = float(getattr(result, "sharpe", 0.0) or 0.0)
+            fitness = float(getattr(result, "fitness", 0.0) or 0.0)
+            turnover = float(getattr(result, "turnover", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return False
+        # BRAIN payloads and historical records may express turnover as either
+        # a fraction (0.10) or a percentage (10.0).
+        if 0.0 <= turnover <= 1.0:
+            turnover *= 100.0
+        return sharpe >= 1.5 and fitness >= 1.0 and turnover <= 30.0
+
+
+    def _run_simulation(self, slot_ids, template: str, region: str):
+        """Run one BRAIN simulation and release all slots reserved for it."""
+        slot_ids = list(slot_ids) if isinstance(slot_ids, (list, tuple)) else [slot_ids]
+        slot_id = slot_ids[0]
         try:
             # Replace placeholders using Ollama selection (like Step 5)
             template_with_placeholders = template
@@ -432,7 +518,7 @@ class MiningEngine:
                                         if slot:
                                             slot.add_log(f"❌ FAILED: Still has placeholders after retry: {remaining_ops + remaining_fields}")
                                             slot.add_log(f"❌ Skipping submission - template: {template[:100]}...")
-                                        self.slot_manager.release_slot(slot_id, success=False, error=f"Placeholders not replaced: {remaining_ops + remaining_fields}")
+                                        self.slot_manager.release_slots(slot_ids, success=False, error=f"Placeholders not replaced: {remaining_ops + remaining_fields}")
                                         return
                                     else:
                                         slot = self.slot_manager.get_slot_status(slot_id)
@@ -442,7 +528,7 @@ class MiningEngine:
                                     slot = self.slot_manager.get_slot_status(slot_id)
                                     if slot:
                                         slot.add_log("❌ Retry replacement failed, skipping submission")
-                                    self.slot_manager.release_slot(slot_id, success=False, error="Placeholder replacement failed")
+                                    self.slot_manager.release_slots(slot_ids, success=False, error="Placeholder replacement failed")
                                     return
                             else:
                                 slot = self.slot_manager.get_slot_status(slot_id)
@@ -469,7 +555,7 @@ class MiningEngine:
                                 slot = self.slot_manager.get_slot_status(slot_id)
                                 if slot:
                                     slot.add_log(f"❌ FAILED: Fallback replacement incomplete. Remaining: {remaining_ops + remaining_fields}")
-                                self.slot_manager.release_slot(slot_id, success=False, error=f"Placeholders not replaced: {remaining_ops + remaining_fields}")
+                                self.slot_manager.release_slots(slot_ids, success=False, error=f"Placeholders not replaced: {remaining_ops + remaining_fields}")
                                 return
                     else:
                         # Fallback to old method
@@ -489,7 +575,7 @@ class MiningEngine:
                             slot = self.slot_manager.get_slot_status(slot_id)
                             if slot:
                                 slot.add_log(f"❌ FAILED: Fallback replacement incomplete. Remaining: {remaining_ops + remaining_fields}")
-                            self.slot_manager.release_slot(slot_id, success=False, error=f"Placeholders not replaced: {remaining_ops + remaining_fields}")
+                            self.slot_manager.release_slots(slot_ids, success=False, error=f"Placeholders not replaced: {remaining_ops + remaining_fields}")
                             return
             
             settings = SimulationSettings(
@@ -511,7 +597,7 @@ class MiningEngine:
                     slot.add_log(f"   Remaining operators: {remaining_ops}")
                     slot.add_log(f"   Remaining fields: {remaining_fields}")
                     slot.add_log(f"   Template: {template[:100]}...")
-                self.slot_manager.release_slot(slot_id, success=False, error=f"Cannot submit: placeholders remain ({remaining_ops + remaining_fields})")
+                self.slot_manager.release_slots(slot_ids, success=False, error=f"Cannot submit: placeholders remain ({remaining_ops + remaining_fields})")
                 slot = self.slot_manager.get_slot_status(slot_id)
                 if slot:
                     slot.add_log("❌ Skipping submission - template has unreplaced placeholders")
@@ -527,8 +613,10 @@ class MiningEngine:
             # Submit
             progress_url = self.simulator_tester.submit_simulation(template, region, settings)
             if not progress_url:
-                self.slot_manager.release_slot(slot_id, success=False, error="Failed to submit")
+                self.slot_manager.release_slots(slot_ids, success=False, error="Failed to submit")
                 return
+
+            self._record_accepted_submission()
             
             # Monitor
             def progress_callback(percent, message, api_status):
@@ -549,7 +637,7 @@ class MiningEngine:
             
             # Check if result is None (simulation failed completely)
             if result is None:
-                self.slot_manager.release_slot(slot_id, success=False, error="Simulation failed")
+                self.slot_manager.release_slots(slot_ids, success=False, error="Simulation failed")
                 self._update_slot(slot_id, template, region, 0, "Simulation failed", "FAILED")
                 self._log(f"❌ {region}: Simulation failed (no result)")
                 return
@@ -559,37 +647,61 @@ class MiningEngine:
                 self.backtest_storage.store_result(result)
             
             # Update correlation tracker
+            metric_pass = self._meets_metric_gates(result)
             if result.success and result.alpha_id:
                 self.correlation_tracker.update_template_alpha_mapping(template, str(result.alpha_id))
-                self.search_strategy.add_successful_template(template, region)
+                if metric_pass:
+                    # Only metric-qualified candidates should influence positive
+                    # examples. Simulation completion alone is not alpha quality.
+                    self.search_strategy.add_successful_template(template, region)
             
             # Release slot
-            self.slot_manager.release_slot(
-                slot_id,
+            self.slot_manager.release_slots(slot_ids,
                 success=result.success,
                 result={
                     'sharpe': result.sharpe,
                     'fitness': result.fitness,
-                    'alpha_id': str(result.alpha_id) if result.alpha_id else ""
+                    'alpha_id': str(result.alpha_id) if result.alpha_id else "",
+                    'metric_gate_pass': metric_pass,
+                    'correlation_review': 'PENDING'
                 } if result.success else None,
                 error=result.error_message if not result.success else None
             )
             
             # Update display
-            status = "SUCCESS" if result.success else "FAILED"
-            message = f"Sharpe: {result.sharpe:.2f}" if result.success else (result.error_message[:30] if result.error_message else "Failed")
+            status = (
+                "METRIC_PASS" if metric_pass
+                else ("COMPLETED_LOW_QUALITY" if result.success else "FAILED")
+            )
+            message = (
+                "Metric gates passed; correlation review pending" if metric_pass else
+                (f"Below metric gates: S={result.sharpe:.2f}, F={result.fitness:.2f}, T={result.turnover:.2f}"
+                 if result.success else (result.error_message[:30] if result.error_message else "Failed"))
+            )
             self._update_slot(slot_id, template, region, 100 if result.success else 0, message, status)
-            
-            # Log
+
+            # Report completed simulations separately from candidates meeting
+            # the research metric gates. Correlation review is still required.
             if result.success:
                 self.simulations_completed_count += 1
-                self._log(f"✅ {region}: Sharpe={result.sharpe:.2f}, Fitness={result.fitness:.2f} (Total: {self.simulations_completed_count})")
+                if metric_pass:
+                    self._log(
+                        f"🟢 {region}: METRIC GATES PASSED (correlation review pending) | "
+                        f"Sharpe={result.sharpe:.2f}, Fitness={result.fitness:.2f}, "
+                        f"Turnover={result.turnover:.2f} (Completed: {self.simulations_completed_count})"
+                    )
+                else:
+                    self._log(
+                        f"⚪ {region}: Simulation completed but did not meet research gates | "
+                        f"Sharpe={result.sharpe:.2f}, Fitness={result.fitness:.2f}, "
+                        f"Turnover={result.turnover:.2f}"
+                    )
             else:
                 self._log(f"❌ {region}: {result.error_message[:50] if result.error_message else 'Unknown error'}")
                 
         except Exception as e:
             logger.error(f"Simulation error: {e}", exc_info=True)
-            self.slot_manager.release_slot(slot_id, success=False, error=str(e))
+            self.slot_manager.release_slots(slot_ids, success=False, error=str(e))
             self._update_slot(slot_id, template, region, 0, str(e)[:30], "FAILED")
     
     def _handle_refeed(self, slot_id: int, template: str, region: str, error_message: str, settings: SimulationSettings):
@@ -655,9 +767,8 @@ class MiningEngine:
                             template, available_fields, region
                         )
 
-        # Check if event input error (unlimited retries)
-        is_event_input_error = 'does not support event inputs' in error_message.lower()
-        max_attempts = 999 if is_event_input_error else 3
+        # Keep correction bounded so a bad template cannot pin a slot indefinitely.
+        max_attempts = 3
 
         fixed_template, fixes = self.generator.template_generator.template_validator.refeed_with_correction(
             template, error_message, region, max_attempts=max_attempts
@@ -718,6 +829,8 @@ class MiningEngine:
             progress_url = self.simulator_tester.submit_simulation(fixed_template, region, settings)
             
             if progress_url:
+                self._record_accepted_submission()
+
                 def progress_callback(percent, message, api_status):
                     self.slot_manager.update_slot_progress(slot_id, percent=percent, message=message, api_status=api_status)
                     slot = self.slot_manager.get_slot_status(slot_id)
@@ -733,6 +846,16 @@ class MiningEngine:
         
         return None
     
+    def _record_accepted_submission(self):
+        """Record an API-accepted submission and refresh the daily counter UI."""
+        status = self.sim_counter.increment_count()
+        if self.update_counter_callback:
+            self.update_counter_callback()
+        if status.get('warning_needed'):
+            self._log("⚠️ Daily simulation usage has reached 4,000 submissions.")
+        if status.get('limit_reached'):
+            self._log("⚠️ Daily simulation limit reached; new submissions will stop.")
+
     def _update_slot(self, slot_id: int, template: str, region: str, progress: float, message: str, status: str = "RUNNING"):
         """Update slot display"""
         if self.update_slot_callback:

@@ -303,6 +303,8 @@ class MiningUI:
             'RUNNING': COLORS.get('accent_yellow', '#ffff00'),
             'SUCCESS': COLORS.get('accent_green', '#00ff41'),
             'COMPLETED': COLORS.get('accent_green', '#00ff41'),
+            'METRIC_PASS': COLORS.get('accent_green', '#00ff41'),
+            'COMPLETED_LOW_QUALITY': COLORS.get('accent_yellow', '#ffff00'),
             'FAILED': COLORS.get('error', '#ff0000')
         }
         widget['status_label'].config(

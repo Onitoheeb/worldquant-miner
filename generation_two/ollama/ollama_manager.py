@@ -70,7 +70,8 @@ class OllamaManager:
         model: str = "qwen2.5-coder:32b",
         timeout: int = 120,
         max_retries: int = 3,
-        rate_limit: float = 2.0  # seconds between requests
+        rate_limit: float = 2.0,  # seconds between requests
+        max_concurrent_generations: int = 1
     ):
         """
         Initialize Ollama manager
@@ -87,6 +88,10 @@ class OllamaManager:
         self.timeout = timeout
         self.max_retries = max_retries
         self.rate_limit = rate_limit
+        # Serialize local-model inference by default. Simulation slots may remain
+        # concurrent, but Ollama generation must not overload a single local model.
+        self.max_concurrent_generations = max(1, int(max_concurrent_generations))
+        self.generation_semaphore = threading.BoundedSemaphore(self.max_concurrent_generations)
         
         # Connection state
         self.is_available = False
@@ -322,11 +327,33 @@ class OllamaManager:
         self.last_request_time = time.time()
     
     def generate(
-        self, 
-        prompt: str, 
+        self,
+        prompt: str,
         system_prompt: str = None,
         temperature: float = 0.7,
-        max_tokens: int = 1000,  # Increased for better context handling
+        max_tokens: int = 1000,
+        progress_callback: Optional[callable] = None
+    ) -> Optional[str]:
+        """Run one local-model generation at a time by default."""
+        queued_at = time.time()
+        logger.info(
+            "Waiting for Ollama generation permit (limit=%s)",
+            self.max_concurrent_generations
+        )
+        with self.generation_semaphore:
+            waited = time.time() - queued_at
+            if waited >= 1:
+                logger.info("Ollama generation permit acquired after %.1fs", waited)
+            return self._generate_impl(
+                prompt, system_prompt, temperature, max_tokens, progress_callback
+            )
+
+    def _generate_impl(
+        self,
+        prompt: str,
+        system_prompt: str = None,
+        temperature: float = 0.7,
+        max_tokens: int = 1000,
         progress_callback: Optional[callable] = None
     ) -> Optional[str]:
         """
@@ -512,16 +539,17 @@ class OllamaManager:
                     else:
                         logger.warning(f"Attempt {attempt + 1}: ⚠️ Ollama returned empty response")
                 
-                # Fallback to requests if ollama didn't work or wasn't available
-                if not generated_text:
-                    logger.debug(f"Attempt {attempt + 1}: Trying requests fallback to {self.base_url}/api/chat")
+                # Use the requests transport only when the Ollama Python client is unavailable.
+                # If the client has already attempted generation and timed out, sending the
+                # same prompt again through HTTP doubles load on a local model (often 32B).
+                if not generated_text and not chat_func:
+                    logger.debug(f"Attempt {attempt + 1}: Ollama library unavailable; trying requests transport")
                     if progress_callback:
                         try:
-                            progress_callback("Using requests fallback...")
+                            progress_callback("Using requests transport...")
                         except Exception:
                             pass
-                    
-                    # Ensure session exists for requests fallback
+
                     if not self.session:
                         try:
                             import requests
@@ -529,10 +557,14 @@ class OllamaManager:
                             logger.debug("Created requests session for fallback")
                         except Exception as session_err:
                             logger.error(f"Failed to create requests session: {session_err}")
-                            continue  # Skip this attempt
-                    
+                            continue
+
                     generated_text = call_ollama_requests(
                         self.session, self.base_url, self.model, messages, temperature, max_tokens, self.timeout
+                    )
+                elif not generated_text and chat_func:
+                    logger.warning(
+                        "Ollama library generation failed; skipping duplicate requests call and moving to retry"
                     )
                 
                 if generated_text:
@@ -638,165 +670,96 @@ class OllamaManager:
         available_fields: List[Dict],
         progress_callback: Optional[Callable[[str], None]] = None,
         generator: Optional[Any] = None,
-        region: str = None,  # New: for querying recently used fields
-        backtest_storage: Optional[Any] = None  # New: for querying database
+        region: str = None,
+        backtest_storage: Optional[Any] = None,
+        alpha_type: str = "REGULAR"
     ) -> Optional[Dict]:
         """
-        Ask Ollama to select operators and fields by index to replace placeholders
-        
-        Args:
-            placeholder_expression: Expression with placeholders like "OPERATOR1(OPERATOR2(DATA_FIELD1), 5)"
-            available_operators: List of available operators
-            available_fields: List of available data fields
-            progress_callback: Optional progress callback
-            generator: Optional generator instance (to reuse mappings)
-        
-        Returns:
-            Dict with "operators" and "fields" mappings, or None if failed
+        Select valid operator/field indices locally.
+
+        This is a constrained list-selection task, not an LLM reasoning task.
+        Keeping it deterministic in structure (with randomized diverse choices)
+        avoids slow, malformed model responses and preserves strict validation.
         """
         from generation_two.core.algorithmic_template_generator import AlgorithmicTemplateGenerator
-        
-        if generator is None:
-            generator = AlgorithmicTemplateGenerator(available_operators, available_fields)
 
-        # Get recently used fields to avoid repetition
+        if generator is None:
+            generator = AlgorithmicTemplateGenerator(available_operators, available_fields, alpha_type=alpha_type)
+
         recently_used_fields = []
         if region and backtest_storage and hasattr(backtest_storage, 'get_recently_used_fields'):
             try:
-                recently_used_fields = backtest_storage.get_recently_used_fields(region, limit=50, lookback_hours=24)
-                if recently_used_fields:
-                    logger.debug(f"Excluding {len(recently_used_fields)} recently used fields for {region}")
+                recently_used_fields = backtest_storage.get_recently_used_fields(
+                    region, limit=50, lookback_hours=24
+                ) or []
             except Exception as e:
-                logger.debug(f"Could not get recently used fields: {e}")
+                logger.debug("Could not retrieve recently used fields: %s", e)
 
-        prompt = generator.get_operator_selection_prompt(
+        # Build the same display-index mappings used by the replacement method.
+        # This also excludes recently used fields and keeps selection compatible
+        # with the existing field/operator catalogue.
+        generator.get_operator_selection_prompt(
             placeholder_expression,
             available_operators,
             available_fields,
-            recently_used_fields=recently_used_fields
+            recently_used_fields=recently_used_fields,
+            alpha_type=alpha_type
         )
-        
-        # Store generator for later use in replacement
         self._last_generator = generator
-        
-        system_prompt = """You are a selection assistant. Your ONLY task is to select INDEX NUMBERS from provided lists.
 
-CRITICAL RULES:
-1. DO NOT generate or write any operator names or field names. ONLY return index numbers in JSON format.
-2. You MUST select indices for EVERY placeholder mentioned in the prompt - missing any placeholder is an error.
-3. Count the placeholders in the expression carefully - if you see OPERATOR1, OPERATOR2, OPERATOR3, OPERATOR4, you must select indices for ALL FOUR.
-4. Return ONLY a valid JSON object with index numbers. No explanations, no markdown, no operator names, no field names - just JSON with numbers.
+        required_operators = sorted(
+            {f"OPERATOR{n}" for n in re.findall(r"OPERATOR(\d+)", placeholder_expression, re.IGNORECASE)},
+            key=lambda value: int(re.search(r"\d+", value).group())
+        )
+        required_fields = sorted(
+            {f"DATA_FIELD{n}" for n in re.findall(r"DATA_FIELD(\d+)", placeholder_expression, re.IGNORECASE)},
+            key=lambda value: int(re.search(r"\d+", value).group())
+        )
 
-Example: If you see operator at [5], return 5 (not the operator name).
-Example: If you see field at [12], return 12 (not the field name).
-Example: If the prompt lists OPERATOR1, OPERATOR2, OPERATOR3, your JSON must include all three: {"operators": {"OPERATOR1": 5, "OPERATOR2": 12, "OPERATOR3": 23}}"""
-        
+        operator_mapping = getattr(generator, "_last_operator_mapping", {})
+        field_mapping = getattr(generator, "_last_field_mapping", {})
+        if len(operator_mapping) < len(required_operators):
+            logger.warning(
+                "Not enough eligible operators: need %d, have %d",
+                len(required_operators), len(operator_mapping)
+            )
+            return None
+        if len(field_mapping) < len(required_fields):
+            logger.warning(
+                "Not enough eligible fields after diversity filtering: need %d, have %d",
+                len(required_fields), len(field_mapping)
+            )
+            return None
+
+        # Sample display indices, not catalogue indices: replacement translates
+        # these through the generator's saved mappings.
+        operator_indices = random.sample(list(operator_mapping.keys()), len(required_operators))
+        field_indices = random.sample(list(field_mapping.keys()), len(required_fields))
+        selection = {
+            "operators": dict(zip(required_operators, operator_indices)),
+            "fields": dict(zip(required_fields, field_indices))
+        }
+
+        logger.info(
+            "Selected placeholders locally (no Ollama call): %d operators, %d fields",
+            len(required_operators), len(required_fields)
+        )
         if progress_callback:
-            progress_callback("Asking Ollama to select operators and fields...")
-        
-        result = self.generate(prompt, system_prompt, temperature=0.3, max_tokens=500, progress_callback=progress_callback)
-        
-        if not result:
-            return None
-        
-        # Parse JSON response
-        try:
-            # Clean up result (remove markdown code blocks if present)
-            result = result.strip()
-            if '```' in result:
-                # Extract JSON from code block
-                lines = result.split('\n')
-                json_lines = []
-                in_json = False
-                for line in lines:
-                    if '```json' in line.lower() or '```' in line:
-                        in_json = not in_json
-                        continue
-                    if in_json or (line.strip().startswith('{') and line.strip().endswith('}')):
-                        json_lines.append(line)
-                if json_lines:
-                    result = '\n'.join(json_lines)
-            
-            # Try to find JSON object
-            json_match = re.search(r'\{[^{}]*"operators"[^{}]*\{[^{}]*\}[^{}]*"fields"[^{}]*\{[^{}]*\}[^{}]*\}', result, re.DOTALL)
-            if json_match:
-                result = json_match.group(0)
-            
-            selection = json.loads(result)
-            
-            # Normalize placeholder keys to uppercase (handle both OPERATOR1 and operator1)
-            if 'operators' in selection:
-                normalized_operators = {}
-                for key, value in selection['operators'].items():
-                    # Convert to uppercase
-                    normalized_key = key.upper()
-                    normalized_operators[normalized_key] = value
-                selection['operators'] = normalized_operators
-            
-            if 'fields' in selection:
-                normalized_fields = {}
-                for key, value in selection['fields'].items():
-                    # Convert to uppercase
-                    normalized_key = key.upper()
-                    normalized_fields[normalized_key] = value
-                selection['fields'] = normalized_fields
-            
-            # Validate that ALL required placeholders are present
-            required_ops = getattr(generator, '_required_operator_placeholders', [])
-            required_fields = getattr(generator, '_required_field_placeholders', [])
-            
-            # Filter out any selections for placeholders that don't exist in the template
-            if 'operators' in selection:
-                valid_operators = {}
-                for key, value in selection['operators'].items():
-                    if key.upper() in required_ops:
-                        valid_operators[key.upper()] = value
-                    else:
-                        logger.warning(f"⚠️ Ollama selected placeholder '{key}' which doesn't exist in template. Ignoring.")
-                selection['operators'] = valid_operators
-            
-            if 'fields' in selection:
-                valid_fields = {}
-                for key, value in selection['fields'].items():
-                    if key.upper() in required_fields:
-                        valid_fields[key.upper()] = value
-                    else:
-                        logger.warning(f"⚠️ Ollama selected placeholder '{key}' which doesn't exist in template. Ignoring.")
-                selection['fields'] = valid_fields
-            
-            missing_operators = [op for op in required_ops if op not in selection.get('operators', {})]
-            missing_fields = [field for field in required_fields if field not in selection.get('fields', {})]
-            
-            if missing_operators or missing_fields:
-                logger.warning(f"⚠️ Ollama did not select all required placeholders!")
-                if missing_operators:
-                    logger.warning(f"   Missing operators: {missing_operators}")
-                if missing_fields:
-                    logger.warning(f"   Missing fields: {missing_fields}")
-                logger.warning(f"   Required operators: {required_ops}")
-                logger.warning(f"   Required fields: {required_fields}")
-                logger.warning(f"   Received (after filtering): {selection}")
-                # Don't return None - we'll try to work with what we have, but log the issue
-            
-            # Validate structure
-            if 'operators' in selection and 'fields' in selection:
-                return selection
-            else:
-                logger.warning(f"Invalid selection structure: {selection}")
-                return None
-                
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse JSON selection: {e}, response: {result[:200]}")
-            return None
-    
+            try:
+                progress_callback("Selected valid operator and field candidates locally.")
+            except Exception:
+                pass
+        return selection
+
     def replace_placeholders_with_selection(
         self,
         placeholder_expression: str,
         available_operators: List[Dict],
         available_fields: List[Dict],
         progress_callback: Optional[Callable[[str], None]] = None,
-        region: str = None,  # New: for querying recently used fields
-        backtest_storage: Optional[Any] = None  # New: for querying database
+        region: str = None,  # For querying recently used fields
+        backtest_storage: Optional[Any] = None,  # For querying database
+        alpha_type: str = "REGULAR"
     ) -> Optional[str]:
         """
         Replace placeholders in expression by asking Ollama to select indices
@@ -813,7 +776,7 @@ Example: If the prompt lists OPERATOR1, OPERATOR2, OPERATOR3, your JSON must inc
         from generation_two.core.algorithmic_template_generator import AlgorithmicTemplateGenerator
         
         # Create generator to get prompt and mappings
-        generator = AlgorithmicTemplateGenerator(available_operators, available_fields)
+        generator = AlgorithmicTemplateGenerator(available_operators, available_fields, alpha_type=alpha_type)
         
         # Ask Ollama to select (this will set _last_operator_mapping and _last_field_mapping)
         selection = self.select_operators_and_fields_by_index(
@@ -823,7 +786,8 @@ Example: If the prompt lists OPERATOR1, OPERATOR2, OPERATOR3, your JSON must inc
             progress_callback,
             generator=generator,
             region=region,
-            backtest_storage=backtest_storage
+            backtest_storage=backtest_storage,
+            alpha_type=alpha_type
         )
         
         if not selection:
@@ -957,7 +921,8 @@ Example: If the prompt lists OPERATOR1, OPERATOR2, OPERATOR3, your JSON must inc
         progress_callback: Optional[Callable[[str], None]] = None,
         use_placeholder_fields: bool = True,  # V2 approach: use placeholders to avoid misspelling
         forbidden_operators: List[str] = None,  # Operators that are forbidden (already used in batch)
-        use_algorithmic_generation: bool = True  # New: Use algorithmic generation + Ollama selection
+        use_algorithmic_generation: bool = True,  # New: Use algorithmic generation + Ollama selection
+        use_placeholder_operators: bool = True
     ) -> Optional[str]:
         """
         Generate alpha template from hypothesis with enhanced prompt engineering and AST guidance
@@ -1000,21 +965,30 @@ Example: If the prompt lists OPERATOR1, OPERATOR2, OPERATOR3, your JSON must inc
                 if progress_callback:
                     progress_callback("Asking Ollama to select operators and fields...")
                 
-                # Step 2: Ask Ollama to select operators/fields by index
-                selection = self.select_operators_and_fields_by_index(
+                # Step 2: Resolve every placeholder using Ollama's selected indices.
+                # Previously the selection response was discarded and the unresolved
+                # placeholder expression was returned, wasting the model request.
+                resolved_expression = self.replace_placeholders_with_selection(
                     placeholder_expr,
                     available_operators,
                     available_fields,
-                    progress_callback
+                    progress_callback=progress_callback,
+                    region=region
                 )
-                
-                # Return placeholder expression (will be replaced later in Step 5 or retry)
-                logger.info(f"Algorithmic generation placeholder: {placeholder_expr}")
-                return placeholder_expr
-                    
+                if not resolved_expression:
+                    logger.warning("Ollama could not resolve all expression placeholders")
+                    return None
+
+                if re.search(r'\b(?:OPERATOR|DATA_FIELD)\d+\b', resolved_expression, re.IGNORECASE):
+                    logger.warning("Unresolved placeholders remain; rejecting generated expression")
+                    return None
+
+                logger.info(f"Resolved algorithmic FASTEXPR expression: {resolved_expression}")
+                return resolved_expression
+
             except Exception as e:
-                logger.error(f"Algorithmic generation failed: {e}", exc_info=True)
-                # Fall through to old method
+                logger.error(f"Algorithmic generation failed; rejecting candidate rather than falling through to unconstrained generation: {e}", exc_info=True)
+                return None
         
         # OLD APPROACH: Direct Ollama generation (fallback)
         system_prompt = """You are an expert in quantitative finance and WorldQuant Brain alpha generation.
@@ -1100,37 +1074,48 @@ CRITICAL FASTEXPR SYNTAX RULES:
                         op_info += f" [Takes {input_count} input{'s' if input_count > 1 else ''}]"
                     if category:
                         op_info += f" (Category: {category})"
+                    scope = op.get('scope', [])
+                    if scope:
+                        op_info += f" [Scope: {scope}]"
                     operator_list.append(op_info)
             
             if operator_list:
-                user_prompt += "\n\n🚨 CRITICAL: AVAILABLE OPERATORS - USE OPERATOR PLACEHOLDERS (OPERATOR1, OPERATOR2, etc.):"
-                user_prompt += "\n" + "\n".join(operator_list)
-                user_prompt += f"\n\n🚨 OPERATOR PLACEHOLDERS: Use OPERATOR1, OPERATOR2, OPERATOR3, etc. instead of actual operator names!"
-                user_prompt += "\n- OPERATOR1 maps to the first operator in the list above"
-                user_prompt += "\n- OPERATOR2 maps to the second operator in the list above"
-                user_prompt += "\n- OPERATOR3 maps to the third operator in the list above"
-                user_prompt += "\n- And so on..."
-                
-                # Add forbidden operators list if provided
-                if forbidden_operators:
-                    user_prompt += f"\n\n🚫 FORBIDDEN OPERATORS (DO NOT USE THESE - already used in batch): {', '.join(forbidden_operators)}"
-                    user_prompt += "\n⚠️ If you use any of these forbidden operators, your expression will be REJECTED!"
-                    user_prompt += "\n⚠️ Use ONLY operators from the AVAILABLE OPERATORS list above, NOT from the FORBIDDEN list!"
-                
-                user_prompt += "\n\nCRITICAL RULES FOR OPERATOR PLACEHOLDERS:"
-                user_prompt += "\n1. Use OPERATOR1, OPERATOR2, OPERATOR3, etc. as placeholders - DO NOT use actual operator names!"
-                user_prompt += "\n2. Example: OPERATOR1(DATA_FIELD1, 5) NOT ts_rank(DATA_FIELD1, 5)"
-                user_prompt += "\n3. Example: OPERATOR1(OPERATOR2(DATA_FIELD1), 5) for nested operators"
-                user_prompt += "\n4. The placeholders will be automatically replaced with actual operator names from the list above"
-                user_prompt += "\n5. Choose operators from the AVAILABLE OPERATORS list by using their index as OPERATOR1, OPERATOR2, etc."
-                user_prompt += "\n6. IMPORTANT: Check the operator definition to see how many inputs it takes!"
-                user_prompt += "\n   - If operator takes 1 input: OPERATOR1(DATA_FIELD1) or OPERATOR1(DATA_FIELD1, parameter)"
-                user_prompt += "\n   - If operator takes 2 inputs: OPERATOR1(DATA_FIELD1, DATA_FIELD2) or OPERATOR1(DATA_FIELD1, DATA_FIELD2, parameter)"
-                user_prompt += "\n   - If operator takes 3 inputs: OPERATOR1(DATA_FIELD1, DATA_FIELD2, DATA_FIELD3)"
-                user_prompt += "\n   - Look at the [Takes X input(s)] note in the operator list above"
-                if forbidden_operators:
-                    user_prompt += "\n7. DO NOT use operators from the FORBIDDEN list"
-        
+                if use_placeholder_operators:
+                    user_prompt += "\n\n🚨 CRITICAL: AVAILABLE OPERATORS - USE OPERATOR PLACEHOLDERS (OPERATOR1, OPERATOR2, etc.):"
+                    user_prompt += "\n" + "\n".join(operator_list)
+                    user_prompt += f"\n\n🚨 OPERATOR PLACEHOLDERS: Use OPERATOR1, OPERATOR2, OPERATOR3, etc. instead of actual operator names!"
+                    user_prompt += "\n- OPERATOR1 maps to the first operator in the list above"
+                    user_prompt += "\n- OPERATOR2 maps to the second operator in the list above"
+                    user_prompt += "\n- OPERATOR3 maps to the third operator in the list above"
+                    user_prompt += "\n- And so on..."
+                    
+                    # Add forbidden operators list if provided
+                    if forbidden_operators:
+                        user_prompt += f"\n\n🚫 FORBIDDEN OPERATORS (DO NOT USE THESE - already used in batch): {', '.join(forbidden_operators)}"
+                        user_prompt += "\n⚠️ If you use any of these forbidden operators, your expression will be REJECTED!"
+                        user_prompt += "\n⚠️ Use ONLY operators from the AVAILABLE OPERATORS list above, NOT from the FORBIDDEN list!"
+                    
+                    user_prompt += "\n\nCRITICAL RULES FOR OPERATOR PLACEHOLDERS:"
+                    user_prompt += "\n1. Use OPERATOR1, OPERATOR2, OPERATOR3, etc. as placeholders - DO NOT use actual operator names!"
+                    user_prompt += "\n2. Example: OPERATOR1(DATA_FIELD1, 5) NOT ts_rank(DATA_FIELD1, 5)"
+                    user_prompt += "\n3. Example: OPERATOR1(OPERATOR2(DATA_FIELD1), 5) for nested operators"
+                    user_prompt += "\n4. The placeholders will be automatically replaced with actual operator names from the list above"
+                    user_prompt += "\n5. Choose operators from the AVAILABLE OPERATORS list by using their index as OPERATOR1, OPERATOR2, etc."
+                    user_prompt += "\n6. IMPORTANT: Check the operator definition to see how many inputs it takes!"
+                    user_prompt += "\n   - If operator takes 1 input: OPERATOR1(DATA_FIELD1) or OPERATOR1(DATA_FIELD1, parameter)"
+                    user_prompt += "\n   - If operator takes 2 inputs: OPERATOR1(DATA_FIELD1, DATA_FIELD2) or OPERATOR1(DATA_FIELD1, DATA_FIELD2, parameter)"
+                    user_prompt += "\n   - If operator takes 3 inputs: OPERATOR1(DATA_FIELD1, DATA_FIELD2, DATA_FIELD3)"
+                    user_prompt += "\n   - Look at the [Takes X input(s)] note in the operator list above"
+                    if forbidden_operators:
+                        user_prompt += "\n7. DO NOT use operators from the FORBIDDEN list"
+            
+
+                else:
+                    user_prompt += "\n\nAVAILABLE OPERATORS (use exact operator names from this list):"
+                    user_prompt += "\n" + "\n".join(operator_list)
+                    user_prompt += "\nUse the exact operator names shown above. Do not invent operators or replace them with placeholders."
+                    if forbidden_operators:
+                        user_prompt += f"\nDo not use these operators: {', '.join(forbidden_operators)}"
         # V3 Approach: Use placeholders (DATA_FIELD1, DATA_FIELD2, etc.) to avoid misspelling
         # Randomly pick a subset of fields to show Ollama
         if use_placeholder_fields and available_fields:
@@ -1164,8 +1149,22 @@ CRITICAL FASTEXPR SYNTAX RULES:
             for field in available_fields:
                 field_id = field.get('id', '')
                 if field_id:
-                    field_examples.append(f"  - {field_id}")
-                    if len(field_examples) >= 15:
+                    metadata_parts = []
+                    field_type = field.get('type') or field.get('field_type')
+                    dataset = field.get('dataset') or field.get('dataset_id')
+                    description = field.get('description')
+                    coverage = field.get('coverage')
+                    if field_type:
+                        metadata_parts.append(f"type={field_type}")
+                    if dataset:
+                        metadata_parts.append(f"dataset={dataset}")
+                    if coverage is not None:
+                        metadata_parts.append(f"coverage={coverage}")
+                    if description:
+                        metadata_parts.append(f"description={str(description)[:140]}")
+                    metadata_text = " | " + " | ".join(metadata_parts) if metadata_parts else ""
+                    field_examples.append(f"  - {field_id}{metadata_text}")
+                    if len(field_examples) >= 25:
                         break
             
             if field_examples:
@@ -1180,37 +1179,45 @@ CRITICAL FASTEXPR SYNTAX RULES:
             for pattern in successful_patterns[:3]:  # Show top 3 patterns
                 user_prompt += f"\n  - {pattern}"
         
-        # Add concrete syntax examples using placeholders (V3 approach) - WITH COMMAS for parameters
-        user_prompt += "\n\nDIVERSE SYNTAX EXAMPLES (use OPERATOR1, OPERATOR2, DATA_FIELD1, DATA_FIELD2 placeholders - COMMAS for parameters!):"
-        if use_placeholder_fields:
-            # Use operator and field placeholders in examples - COMMAS for operator parameters
-            user_prompt += "\n  - OPERATOR1(DATA_FIELD1, 4)  # Operator with parameter - COMMA between field and parameter"
-            user_prompt += "\n  - OPERATOR1(DATA_FIELD1)  # Operator without parameter (no comma needed)"
-            user_prompt += "\n  - OPERATOR1(OPERATOR2(DATA_FIELD1), 5)  # Nested operators - COMMA between arguments"
-            user_prompt += "\n  - DATA_FIELD1 + DATA_FIELD2  # Arithmetic addition - NO comma (just space around +)"
-            user_prompt += "\n  - OPERATOR1(DATA_FIELD1, 2)  # Power-like operator - COMMA between field and parameter"
-            user_prompt += "\n  - OPERATOR1(DATA_FIELD1 - OPERATOR2(DATA_FIELD1, 20))  # Absolute deviation - COMMA in nested operator"
-            user_prompt += "\n  - OPERATOR1(DATA_FIELD1 * DATA_FIELD2, 10)  # Rank of product - COMMA before parameter"
-            user_prompt += "\n  - OPERATOR1(DATA_FIELD1 / DATA_FIELD2, 3)  # Winsorized ratio - COMMA before parameter"
-            user_prompt += "\n  - OPERATOR1(OPERATOR2(OPERATOR3(DATA_FIELD1)), DATA_FIELD2)  # Complex nested - COMMA between arguments"
-            user_prompt += "\n\nCRITICAL: Use OPERATOR1, OPERATOR2, etc. for operators and DATA_FIELD1, DATA_FIELD2, etc. for fields!"
-            user_prompt += "\nExample format: OPERATOR1(OPERATOR2(DATA_FIELD1), 5)"
-        elif available_fields and len(available_fields) > 0:
-            # Fallback: Use actual field IDs (old approach)
-            example_fields = [f.get('id', '') for f in available_fields[:6] if f.get('id')]
-            if example_fields:
-                user_prompt += f"\n  - winsorize({example_fields[0]}, 4)  # Winsorize to 4 std"
+        # Provide examples that match the configured placeholder mode.
+        if not use_placeholder_operators and not use_placeholder_fields:
+            user_prompt += "\n\nDIVERSE SYNTAX EXAMPLES (use exact listed operator and field names):"
+            example_operators = [
+                op.get("name", "") for op in (available_operators or [])
+                if op.get("name")
+            ]
+            example_fields = [
+                field.get("id", "") for field in (available_fields or [])
+                if field.get("id")
+            ]
+            if example_operators and example_fields:
+                user_prompt += f"\n  - {example_operators[0]}({example_fields[0]})"
+                if len(example_operators) > 1 and len(example_fields) > 1:
+                    user_prompt += f"\n  - {example_operators[1]}({example_fields[1]}, 20)"
                 if len(example_fields) > 1:
-                    user_prompt += f"\n  - zscore({example_fields[1]})  # Z-score normalization"
-                if len(example_fields) > 2:
-                    user_prompt += f"\n  - rank({example_fields[2]})  # Cross-sectional rank"
-                if len(example_fields) > 3:
-                    user_prompt += f"\n  - {example_fields[3]} + {example_fields[4]}  # Arithmetic addition"
+                    user_prompt += f"\n  - {example_fields[0]} / {example_fields[1]}"
+            user_prompt += "\nDo not use OPERATOR or DATA_FIELD placeholders."
         else:
-            # Fallback examples
-            user_prompt += "\n  - winsorize(field_id, 4)  # Winsorize to 4 std"
-            user_prompt += "\n  - zscore(field_id)  # Z-score normalization"
-            user_prompt += "\n  - rank(field_id)  # Cross-sectional rank"
+            # Placeholder-mode examples remain available for the legacy pipeline.
+            user_prompt += "\n\nDIVERSE SYNTAX EXAMPLES (use placeholders only where instructed - COMMAS for parameters!):"
+            if use_placeholder_fields:
+                user_prompt += "\n  - OPERATOR1(DATA_FIELD1, 4)  # Operator with parameter"
+                user_prompt += "\n  - OPERATOR1(DATA_FIELD1)  # Operator without parameter"
+                user_prompt += "\n  - OPERATOR1(OPERATOR2(DATA_FIELD1), 5)  # Nested operators"
+                user_prompt += "\n  - DATA_FIELD1 + DATA_FIELD2  # Arithmetic addition"
+                user_prompt += "\nUse the exact placeholder format requested above."
+            elif available_fields:
+                example_fields = [f.get('id', '') for f in available_fields[:6] if f.get('id')]
+                if example_fields:
+                    user_prompt += f"\n  - winsorize({example_fields[0]}, 4)"
+                    if len(example_fields) > 1:
+                        user_prompt += f"\n  - zscore({example_fields[1]})"
+                    if len(example_fields) > 2:
+                        user_prompt += f"\n  - rank({example_fields[2]})"
+            else:
+                user_prompt += "\n  - winsorize(field_id, 4)"
+                user_prompt += "\n  - zscore(field_id)"
+                user_prompt += "\n  - rank(field_id)"
         
         if dataset_categories:
             user_prompt += f"\n\nRequired dataset categories: {', '.join(dataset_categories)}"
@@ -1223,29 +1230,20 @@ CRITICAL FASTEXPR SYNTAX RULES:
             user_prompt += "\nGenerate a NEW and DIFFERENT expression, not similar to the ones above."
         
         user_prompt += "\n\nDIVERSITY REQUIREMENTS:"
-        user_prompt += "\n- Use DIFFERENT operators each time (avoid repeating OPERATOR1, OPERATOR1, OPERATOR1...)"
-        user_prompt += "\n- Mix different operator types from the AVAILABLE OPERATORS list"
-        user_prompt += "\n- Combine operators creatively: e.g., OPERATOR1(DATA_FIELD1 + DATA_FIELD2, 4) or OPERATOR1(OPERATOR2(DATA_FIELD1), 0.5)"
-        user_prompt += "\n- Use arithmetic operators when appropriate: +, -, *, /"
-        user_prompt += "\n- Use logical operators when appropriate: >, <, >=, <=, ==, !=, &&, ||"
-        user_prompt += "\n- CRITICAL: Use COMMAS for operator parameters: OPERATOR1(DATA_FIELD1, 20) NOT OPERATOR1(DATA_FIELD1 20)"
-        
-        user_prompt += "\n\n🚨 CRITICAL: MAXIMUM 5 OPERATORS - NO EXCEPTIONS!"
-        user_prompt += "\n- Count operators carefully: each OPERATOR1, OPERATOR2, etc. counts as 1 operator"
-        user_prompt += "\n- Arithmetic operators (+, -, *, /) also count as operators"
-        user_prompt += "\n- Example with 3 operators: OPERATOR1(OPERATOR2(OPERATOR3(DATA_FIELD1))) = 3 operators"
-        user_prompt += "\n- Example with 5 operators: OPERATOR1(OPERATOR2(OPERATOR3(OPERATOR4(OPERATOR5(DATA_FIELD1)))), 4) = exactly 5 operators"
-        user_prompt += "\n- DO NOT exceed 5 operators - if you need more, simplify the expression!"
-        user_prompt += "\n\n🚨 CRITICAL: NO CONSECUTIVE DUPLICATE OPERATORS!"
-        user_prompt += "\n- DO NOT nest the same operator placeholder multiple times: OPERATOR1(OPERATOR1(OPERATOR1(...))) is FORBIDDEN"
-        user_prompt += "\n- Each operator placeholder should appear only ONCE in the expression, or at most in different contexts (not nested)"
-        user_prompt += "\n- Example of FORBIDDEN: OPERATOR1(OPERATOR1(OPERATOR1(DATA_FIELD1))) - REJECTED"
-        user_prompt += "\n- Example of ALLOWED: OPERATOR1(DATA_FIELD1, 20) + OPERATOR1(DATA_FIELD2, 10) - different contexts, OK"
-        user_prompt += "\n\nGenerate a SIMPLE, valid FASTEXPR expression using MAXIMUM 5 operators total. Keep it simple - avoid deep nesting."
-        user_prompt += "\nUse COMMAS for parameters: OPERATOR1(DATA_FIELD1, param). Return ONLY the expression:"
-        user_prompt += "\n\n🚨 CRITICAL: Return ONLY the FASTEXPR expression with placeholders. NO natural language, NO explanations, NO 'Let's generate...', NO 'We'll focus...'."
-        user_prompt += "\nJust return the pure expression with placeholders like: OPERATOR1(OPERATOR2(DATA_FIELD1), 5)"
-        
+        user_prompt += "\n- Explore a genuinely different financial relationship, not only a cosmetic parameter change."
+        user_prompt += "\n- Prefer operators whose definitions, scopes, and input counts match the selected fields."
+        user_prompt += "\n- Use arithmetic or logical operators only when they make economic sense."
+        user_prompt += "\n- Keep the expression simple and use no more than 5 function operators."
+        if use_placeholder_operators or use_placeholder_fields:
+            user_prompt += "\n- Respect the placeholder instructions above exactly."
+            user_prompt += "\n- Use commas for operator parameters."
+            user_prompt += "\nReturn ONLY the FASTEXPR expression, with placeholders only where requested."
+        else:
+            user_prompt += "\n- Use exact operator names and exact field IDs from the catalogues above."
+            user_prompt += "\n- Do not output OPERATORn or DATA_FIELDn placeholders."
+            user_prompt += "\n- Do not invent operators, fields, or unsupported arguments."
+            user_prompt += "\nReturn ONLY the complete FASTEXPR expression, without explanations or markdown."
+
         # Debug: Log that we're about to call generate
         logger.debug(f"Calling Ollama generate() with prompt length: {len(user_prompt)}")
         result = self.generate(user_prompt, system_prompt, temperature=0.7, max_tokens=300, progress_callback=progress_callback)

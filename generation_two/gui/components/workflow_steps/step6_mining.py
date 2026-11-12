@@ -110,11 +110,16 @@ class Step6Mining:
             search_strategy_manager=self.search_strategy,
             sim_counter=self.sim_counter,
             log_callback=self._log_mining,
-            update_slot_callback=self._update_mining_slot_display
+            update_slot_callback=self._update_mining_slot_display,
+            update_counter_callback=self._update_sim_counter_display
         )
         
         # Start mining engine
         self.mining_engine.start()
+        self.ui.mining_status_label.config(
+            text="Status: Running",
+            fg=COLORS['accent_green']
+        )
         
         # Start slot update thread
         self._start_slot_update_thread()
@@ -129,10 +134,16 @@ class Step6Mining:
         if self.mining_engine:
             self.mining_engine.stop()
         
-        self.ui.mining_status_label.config(text="Status: Stopping...", fg=COLORS['accent_yellow'])
+        self.ui.mining_status_label.config(
+            text="Status: Stop requested (active BRAIN jobs finishing)",
+            fg=COLORS['accent_yellow']
+        )
         self.ui.start_mining_button.config(state=tk.NORMAL)
         self.ui.stop_mining_button.config(state=tk.DISABLED)
-        self._log_mining("⚠️ Stopping mining...\n")
+        self._log_mining(
+            "⚠️ Stop requested. No new simulations will start; already accepted BRAIN jobs "
+            "will finish monitoring before their workers exit.\n"
+        )
     
     def _update_sim_counter_display(self):
         """Update simulation counter display"""
@@ -160,9 +171,15 @@ class Step6Mining:
                             slot = self.mining_slot_manager.get_slot_status(slot_id)
                             if slot.status != SlotStatus.IDLE:
                                 logs = slot.get_logs()[-50:] if len(slot.get_logs()) > 50 else slot.get_logs()
+                                display_status = slot.status.value.upper()
+                                if slot.status == SlotStatus.COMPLETED and isinstance(slot.result, dict):
+                                    if slot.result.get("metric_gate_pass") is True:
+                                        display_status = "METRIC_PASS"
+                                    elif slot.result.get("metric_gate_pass") is False:
+                                        display_status = "COMPLETED_LOW_QUALITY"
                                 self._update_mining_slot_display(
                                     slot_id,
-                                    slot.status.value.upper(),
+                                    display_status,
                                     slot.template[:40] + "..." if slot.template else "",
                                     f"Region: {slot.region}" if slot.region else "",
                                     slot.progress_percent,

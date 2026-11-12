@@ -83,14 +83,17 @@ class FASTEXPRParser:
         '&&': 0, '||': 0,
     }
     
-    def __init__(self, operators: List[Dict] = None, data_fields: List[Dict] = None):
+    def __init__(
+        self,
+        operators: List[Dict] = None,
+        data_fields: List[Dict] = None,
+        alpha_type: str = "REGULAR"
+    ):
         """
-        Initialize parser with operators and data fields
-        
-        Args:
-            operators: List of operator dicts from operatorRAW.json
-            data_fields: List of data field dicts from API
+        Initialize parser with operators, data fields, and the BRAIN alpha type.
+        Generation Two submits REGULAR alphas by default.
         """
+        self.alpha_type = (alpha_type or "REGULAR").upper()
         self.operators: Dict[str, Dict] = {}
         self.operator_scopes: Dict[str, Set[str]] = {}  # operator_name -> {REGULAR, MATRIX, VECTOR}
         self.vec_operators: Set[str] = set()  # Operators that start with vec_
@@ -151,7 +154,105 @@ class FASTEXPRParser:
                 self.data_fields[field_id] = field
                 field_type = field.get('type', 'REGULAR')
                 self.field_types[field_id] = field_type
-    
+
+    def load_event_input_knowledge_from_db(self, db_path: Optional[str] = None) -> int:
+        """Load only operator restrictions backed by explicit BRAIN error text.
+
+        Older versions guessed the first operator in an expression when the
+        error did not name one. Those rows are ignored, even if they remain in
+        SQLite, so historical guesses cannot poison current validation.
+        """
+        path = db_path or getattr(self, "db_path", None)
+        if not path or not Path(path).exists():
+            return 0
+
+        conn = None
+        try:
+            import sqlite3
+            conn = sqlite3.connect(path, timeout=5)
+            rows = conn.execute(
+                """
+                SELECT operator_name, error_message, metadata
+                FROM compiler_knowledge
+                WHERE knowledge_type = 'event_input_incompatible'
+                  AND compatibility_status = 'incompatible'
+                """
+            ).fetchall()
+
+            learned = set()
+            for operator_name, error_message, metadata_raw in rows:
+                if not operator_name or not error_message:
+                    continue
+                try:
+                    metadata = json.loads(metadata_raw) if metadata_raw else {}
+                except (TypeError, ValueError):
+                    metadata = {}
+
+                if metadata.get("extracted_from_template"):
+                    continue
+
+                name = str(operator_name).strip().lower()
+                pattern = (
+                    r"(?:operator\s+)?" + re.escape(name) +
+                    r"\s+(?:does\s+not\s+support|expects\s+only)"
+                    r"\s+event\s+inputs"
+                )
+                if re.search(pattern, str(error_message), re.IGNORECASE):
+                    learned.add(name)
+
+            self.event_input_incompatible_operators.update(learned)
+            logger.info(
+                "Loaded %s explicitly BRAIN-confirmed event-input restrictions from %s",
+                len(learned), path
+            )
+            return len(learned)
+        except Exception as exc:
+            logger.debug("Could not load persisted event-input knowledge: %s", exc)
+            return 0
+        finally:
+            if conn is not None:
+                conn.close()
+
+    @staticmethod
+    def _metadata_contains_event(value) -> bool:
+        """Check structured field metadata for an explicit event classification."""
+        if isinstance(value, dict):
+            return any(
+                FASTEXPRParser._metadata_contains_event(item)
+                for key, item in value.items()
+                if str(key).lower() in {
+                    "name", "type", "category", "subcategory", "description",
+                    "value", "label"
+                }
+            )
+        if isinstance(value, (list, tuple, set)):
+            return any(FASTEXPRParser._metadata_contains_event(item) for item in value)
+        return "event" in str(value or "").strip().lower()
+
+    def _is_event_input_field(self, field_name: str) -> bool:
+        """Return event status only from explicit field classification."""
+        field_info = self.data_fields.get(field_name, {}) or {}
+        explicit_flag = field_info.get("is_event_input")
+
+        if isinstance(explicit_flag, bool):
+            return explicit_flag
+
+        if isinstance(explicit_flag, int) and explicit_flag in (0, 1):
+            return bool(explicit_flag)
+
+        # Unknown classifications are rejected earlier by the field-catalogue
+        # loader. Never infer event status from names, categories or descriptions.
+        return False
+
+    @staticmethod
+    def _iter_field_nodes(node: ASTNode):
+        """Yield every field node nested anywhere below an AST node."""
+        if node.node_type == "field":
+            yield node
+            return
+        for child in node.children:
+            yield from FASTEXPRParser._iter_field_nodes(child)
+
     def parse(self, template: str) -> Tuple[Optional[ASTNode], List[SyntaxError]]:
         """
         Parse FASTEXPR template into AST
@@ -292,11 +393,18 @@ class FASTEXPRParser:
             
             left_node = self._parse_expression(template, start, start + len(left_expr)) if left_expr else None
             right_node = self._parse_expression(template, start + lowest_pos + len(lowest_op), end) if right_expr else None
-            
+
+            # Permit unary minus/not, but reject missing operands in binary expressions.
+            if not right_node:
+                raise ValueError(f"Missing right operand for '{lowest_op}'")
+            if not left_node and lowest_op not in ('-', '!'):
+                raise ValueError(f"Missing left operand for '{lowest_op}'")
+
+            children = [node for node in (left_node, right_node) if node]
             return ASTNode(
                 node_type='arithmetic',
                 value=lowest_op,
-                children=[n for n in [left_node, right_node] if n],
+                children=children,
                 position=(start, end)
             )
         
@@ -352,8 +460,9 @@ class FASTEXPRParser:
                 arg_str = args_str[current_start:i].strip()
                 if arg_str:
                     arg_node = self._parse_expression(args_str, current_start, i)
-                    if arg_node:
-                        args.append(arg_node)
+                    if not arg_node:
+                        raise ValueError(f"Invalid FASTEXPR function argument: {arg_str!r}")
+                    args.append(arg_node)
                 current_start = i + 1
         
         # Last argument
@@ -361,11 +470,117 @@ class FASTEXPRParser:
             arg_str = args_str[current_start:].strip()
             if arg_str:
                 arg_node = self._parse_expression(args_str, current_start, len(args_str))
-                if arg_node:
-                    args.append(arg_node)
+                if not arg_node:
+                    raise ValueError(f"Invalid FASTEXPR function argument: {arg_str!r}")
+                args.append(arg_node)
         
         return args
     
+    @staticmethod
+    def _operator_arity_from_definition(operator: Dict) -> Optional[Tuple[int, Optional[int]]]:
+        """Extract required and maximum positional arity from operator catalogue metadata.
+
+        Returns None when the catalogue definition is not a simple function signature;
+        unknown signatures are deliberately not guessed.
+        """
+        name = str(operator.get("name", "")).strip()
+        definition = str(operator.get("definition", "")).strip()
+        match = re.match(r"^([a-zA-Z_][a-zA-Z0-9_]*)\s*\((.*)\)", definition)
+        if not match or match.group(1) != name:
+            return None
+
+        params_text = match.group(2).strip()
+        if not params_text:
+            return (0, 0)
+
+        params = []
+        depth = 0
+        quote = None
+        start = 0
+        for index, char in enumerate(params_text):
+            if quote:
+                if char == quote and (index == 0 or params_text[index - 1] != "\\"):
+                    quote = None
+                continue
+            if char in ("'", '"'):
+                quote = char
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+            elif char == "," and depth == 0:
+                params.append(params_text[start:index].strip())
+                start = index + 1
+        params.append(params_text[start:].strip())
+
+        required = 0
+        maximum = 0
+        variadic = False
+        for param in params:
+            if not param:
+                return None
+            if param in {"...", ".."}:
+                variadic = True
+                continue
+            if param.endswith("..."):
+                variadic = True
+                param = param[:-3].strip()
+            elif param.endswith(".."):
+                variadic = True
+                param = param[:-2].strip()
+            if not param:
+                continue
+            maximum += 1
+            if "=" not in param:
+                required += 1
+
+        return required, (None if variadic else maximum)
+
+    def _validate_operator_arity(self, operator_name: str, ast: ASTNode, template: str) -> List[SyntaxError]:
+        """Reject known operator calls whose argument count contradicts catalogue metadata."""
+        operator = self.operators.get(operator_name, {})
+        arity = self._operator_arity_from_definition(operator)
+        if arity is None:
+            return []
+
+        minimum, maximum = arity
+        actual = len(ast.children)
+        if actual < minimum or (maximum is not None and actual > maximum):
+            if maximum is None:
+                expected = f"at least {minimum}"
+            elif minimum == maximum:
+                expected = f"exactly {minimum}"
+            else:
+                expected = f"between {minimum} and {maximum}"
+            return [SyntaxError(
+                "invalid_operator_arguments",
+                f"Operator {operator_name} expects {expected} input(s), got {actual}",
+                ast.position,
+                template,
+                operator_name=operator_name
+            )]
+        return []
+
+    def _is_explicit_grouping_field(self, field_name: str) -> bool:
+        """Return True only when field metadata explicitly identifies a grouping field.
+
+        BRAIN's densify operator requires a grouping field, not an ordinary
+        scalar/matrix/vector data field. Never infer this from the field name.
+        """
+        info = self.data_fields.get(field_name, {}) or {}
+        field_type = str(info.get("type", "")).strip().upper()
+        if field_type in {"GROUP", "GROUPING"}:
+            return True
+        if info.get("is_group") is True or info.get("is_grouping") is True:
+            return True
+        for key in ("category", "subcategory", "field_category", "description"):
+            value = str(info.get(key, "")).strip().lower()
+            if value in {"group", "grouping", "grouping field"}:
+                return True
+            if key == "description" and "grouping field" in value:
+                return True
+        return False
+
     def _validate_ast(self, ast: ASTNode, template: str) -> List[SyntaxError]:
         """Validate AST for operator-field compatibility"""
         errors = []
@@ -384,36 +599,89 @@ class FASTEXPRParser:
                     operator_name=operator_name
                 ))
             else:
-                # Get operator scope
+                # Validate arity only when the operator catalogue provides a
+                # recognizable signature. Unknown signatures remain unchecked rather
+                # than being repaired or guessed.
+                arity_errors = self._validate_operator_arity(operator_name, ast, template)
+                if arity_errors:
+                    errors.extend(arity_errors)
+                    return errors
+
+                # Operator scope identifies the BRAIN alpha type in which this
+                # operator is available; it is not a field type.
                 operator_scope = self.operator_scopes.get(operator_name, set())
-                
+                if operator_scope and self.alpha_type not in operator_scope:
+                    errors.append(SyntaxError(
+                        'invalid_operator',
+                        f'Operator {operator_name} is not available for {self.alpha_type} alphas (scope: {sorted(operator_scope)})',
+                        ast.position,
+                        template,
+                        operator_name=operator_name
+                    ))
+                    return errors
+
+                # densify has a stricter semantic input contract than ordinary
+                # REGULAR-scope operators: its input must be a grouping field.
+                # The public operator catalogue describes densify(x) as converting
+                # a grouping field; reject unknown/scalar fields instead of
+                # allowing BRAIN to discover the mismatch after submission.
+                if operator_name == "densify":
+                    if len(ast.children) != 1 or ast.children[0].node_type != "field":
+                        errors.append(SyntaxError(
+                            'type_mismatch',
+                            'densify requires one explicit grouping-field input; nested expressions are not accepted',
+                            ast.position,
+                            template,
+                            operator_name=operator_name,
+                            expected_type='GROUP'
+                        ))
+                        return errors
+                    group_field = ast.children[0].value
+                    if not self._is_explicit_grouping_field(group_field):
+                        field_info = self.data_fields.get(group_field, {}) or {}
+                        actual = field_info.get("type") or field_info.get("category") or "unclassified field"
+                        errors.append(SyntaxError(
+                            'type_mismatch',
+                            f'densify requires a grouping field, but {group_field} is classified as {actual}',
+                            ast.children[0].position,
+                            template,
+                            operator_name=operator_name,
+                            field_name=group_field,
+                            expected_type='GROUP',
+                            actual_type=str(actual)
+                        ))
+                        return errors
+
                 # Validate arguments (fields)
                 for child in ast.children:
                     child_errors = self._validate_ast(child, template)
                     errors.extend(child_errors)
                     
-                    # Check field-operator compatibility
-                    if child.node_type == 'field':
-                        field_name = child.value
-                        field_type = self.field_types.get(field_name)
-                        
-                        # Check if field is event input type
-                        field_info = self.data_fields.get(field_name, {})
-                        is_event_input = field_info.get('type') == 'EVENT' or 'event' in str(field_info.get('category', '')).lower()
-                        
-                        # Check event input compatibility (learned from simulation errors)
-                        if is_event_input and operator_name in self.event_input_incompatible_operators:
+                    # Check event-input compatibility against every field nested
+                    # inside this operator's arguments, not only immediate field
+                    # children (e.g. abs(ts_mean(event_field)).
+                    for field_node in self._iter_field_nodes(child):
+                        field_name = field_node.value
+                        if (
+                            self._is_event_input_field(field_name)
+                            and operator_name in self.event_input_incompatible_operators
+                        ):
                             errors.append(SyntaxError(
                                 'event_input_incompatible',
                                 f'Operator {operator_name} does not support event inputs (field: {field_name})',
-                                child.position,
+                                field_node.position,
                                 template,
                                 operator_name=operator_name,
                                 field_name=field_name,
                                 expected_type='NON_EVENT',
                                 actual_type='EVENT'
                             ))
-                        
+
+                    # Check field-operator compatibility for direct field arguments.
+                    if child.node_type == 'field':
+                        field_name = child.value
+                        field_type = self.field_types.get(field_name)
+
                         if field_type:
                             # Check compatibility
                             if 'REGULAR' not in operator_scope and 'MATRIX' not in operator_scope and 'VECTOR' not in operator_scope:
@@ -521,7 +789,39 @@ class FASTEXPRParser:
                 ))
         
         elif ast.node_type == 'arithmetic':
-            # Validate children
+            # FASTEXPR arithmetic is lowered by BRAIN to named operators.
+            # In particular, unary negation is implemented as multiply by -1.
+            # Apply the same learned event-input rules to arithmetic nodes;
+            # otherwise expressions such as event_field + price_field bypass
+            # the function-call checks and are submitted to BRAIN invalid.
+            arithmetic_operator = {
+                '+': 'add',
+                '-': 'subtract',
+                '*': 'multiply',
+                '/': 'divide',
+                '^': 'power',
+                '%': 'modulo',
+            }.get(ast.value)
+            if ast.value == '-' and len(ast.children) == 1:
+                arithmetic_operator = 'multiply'
+
+            if arithmetic_operator in self.event_input_incompatible_operators:
+                for child in ast.children:
+                    for field_node in self._iter_field_nodes(child):
+                        field_name = field_node.value
+                        if self._is_event_input_field(field_name):
+                            errors.append(SyntaxError(
+                                'event_input_incompatible',
+                                f'Operator {arithmetic_operator} does not support event inputs (field: {field_name})',
+                                field_node.position,
+                                template,
+                                operator_name=arithmetic_operator,
+                                field_name=field_name,
+                                expected_type='NON_EVENT',
+                                actual_type='EVENT'
+                            ))
+
+            # Validate children after checking the arithmetic operation itself.
             for child in ast.children:
                 errors.extend(self._validate_ast(child, template))
         
@@ -559,28 +859,13 @@ class SelfCorrectingAST:
         self._load_compiler_knowledge()
     
     def _load_compiler_knowledge(self):
-        """Load compiler knowledge from database (event input incompatibilities, etc.) - OPTIMIZED"""
+        """Load only evidence-checked event-input restrictions from SQLite."""
         try:
-            from ..storage.backtest_storage import BacktestStorage
-            # Use db_path from parser if available, otherwise use default
-            db_path = getattr(self.parser, 'db_path', 'generation_two_backtests.db')
-            storage = BacktestStorage(db_path)
-            
-            # Load only event input incompatibilities (targeted query, no limit needed for this small set)
-            knowledge = storage.get_compiler_knowledge(
-                knowledge_type='event_input_incompatible',
-                limit=50  # Reasonable limit for event input operators
-            )
-            for record in knowledge:
-                operator_name = record.get('operator_name')
-                if operator_name:
-                    if not hasattr(self.parser, 'event_input_incompatible_operators'):
-                        self.parser.event_input_incompatible_operators = set()
-                    self.parser.event_input_incompatible_operators.add(operator_name.lower())
-                    logger.debug(f"Loaded compiler knowledge: {operator_name} does not support event inputs")
-        except Exception as e:
-            logger.debug(f"Failed to load compiler knowledge: {e}")
-    
+            db_path = getattr(self.parser, "db_path", "generation_two_backtests.db")
+            self.parser.load_event_input_knowledge_from_db(db_path)
+        except Exception as exc:
+            logger.debug("Failed to load verified compiler knowledge: %s", exc)
+
     def learn_from_error(self, template: str, error_message: str, fixed_template: Optional[str] = None):
         """Learn from a template error"""
         self.failed_templates.append((template, error_message))

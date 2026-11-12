@@ -31,7 +31,10 @@ class DataFieldFetcher:
         self.session = session
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(exist_ok=True)
-        self.data_fields: Dict[str, List[Dict]] = {}  # {region: [fields]}
+        self.data_fields: Dict[str, List[Dict]] = {}  # Latest loaded fields per region for legacy callers
+        # Exact-key cache prevents a TOP3000/delay-1 result from being reused
+        # for another universe or delay in the same process.
+        self._memory_cache: Dict[tuple, List[Dict]] = {}
     
     def fetch_data_fields(
         self,
@@ -104,10 +107,17 @@ class DataFieldFetcher:
         cache_key = f"{region}_{delay}_{universe}"
         cache_file = self.cache_dir / f"data_fields_cache_{cache_key}.json"
         
-        # Try cache first (OPTIMIZED: check if already loaded in memory)
-        if region in self.data_fields and self.data_fields[region]:
-            logger.debug(f"Using in-memory cache for {region} ({len(self.data_fields[region])} fields)")
-            return self.data_fields[region]
+        # Try the exact region/delay/universe cache first. A region-only cache
+        # key silently mixed datasets when users switched universes or delays.
+        memory_key = (region, int(delay), universe)
+        if not force_refresh and memory_key in self._memory_cache:
+            cached_fields = self._memory_cache[memory_key]
+            logger.debug(
+                "Using exact in-memory data-field cache for %s delay=%s universe=%s (%s fields)",
+                region, delay, universe, len(cached_fields)
+            )
+            self.data_fields[region] = cached_fields
+            return cached_fields
         
         if not force_refresh and cache_file.exists():
             try:
@@ -155,10 +165,12 @@ class DataFieldFetcher:
                     else:
                         logger.info(f"✅ Cached data validation: {len(matching_fields)} fields match exact parameters")
                         self.data_fields[region] = matching_fields
+                        self._memory_cache[memory_key] = matching_fields
                         return matching_fields
                 else:
                     # No universe specified, return all cached data
                     self.data_fields[region] = cached_data
+                    self._memory_cache[memory_key] = cached_data
                     return cached_data
                     
             except Exception as e:
@@ -324,6 +336,7 @@ class DataFieldFetcher:
             # Cache the fetched data
             logger.info(f"[{region}] Caching {len(field_list)} fields...")
             self.data_fields[region] = field_list
+            self._memory_cache[memory_key] = field_list
             self._save_cache(region, cache_file)
             logger.info(f"[{region}] ✅ Successfully fetched and cached {len(field_list)} data fields")
             
