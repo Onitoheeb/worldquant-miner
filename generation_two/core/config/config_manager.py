@@ -57,7 +57,9 @@ class ConfigManager:
         Args:
             config_path: Path to config file (creates default if None)
         """
-        self.config_path = config_path or "generation_two_config.json"
+        # Keep configuration independent of the shell's current working directory.
+        default_config_path = Path(__file__).resolve().parents[2] / "generation_two_config.json"
+        self.config_path = str(Path(config_path).expanduser().resolve()) if config_path else str(default_config_path)
         self.sections: Dict[str, ConfigSection] = {}
         self._change_history: list = []
         self._listeners: list = []  # Callbacks for config changes
@@ -251,7 +253,7 @@ class ConfigManager:
             return
         
         try:
-            with open(load_path, 'r') as f:
+            with Path(load_path).expanduser().open('r', encoding='utf-8') as f:
                 data = json.load(f)
             
             for section_name, section_data in data.items():
@@ -281,7 +283,9 @@ class ConfigManager:
             for name, section in self.sections.items():
                 data[name] = section.to_dict()
             
-            with open(save_path, 'w') as f:
+            destination = Path(save_path).expanduser()
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with destination.open('w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2)
             
             logger.info(f"Configuration saved to {save_path}")
