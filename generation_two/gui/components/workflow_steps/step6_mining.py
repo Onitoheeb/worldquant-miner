@@ -134,10 +134,16 @@ class Step6Mining:
         if self.mining_engine:
             self.mining_engine.stop()
         
-        self.ui.mining_status_label.config(text="Status: Stopping...", fg=COLORS['accent_yellow'])
+        self.ui.mining_status_label.config(
+            text="Status: Stop requested (active BRAIN jobs finishing)",
+            fg=COLORS['accent_yellow']
+        )
         self.ui.start_mining_button.config(state=tk.NORMAL)
         self.ui.stop_mining_button.config(state=tk.DISABLED)
-        self._log_mining("⚠️ Stopping mining...\n")
+        self._log_mining(
+            "⚠️ Stop requested. No new simulations will start; already accepted BRAIN jobs "
+            "will finish monitoring before their workers exit.\n"
+        )
     
     def _update_sim_counter_display(self):
         """Update simulation counter display"""
