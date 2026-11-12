@@ -661,7 +661,9 @@ class MiningEngine:
                 result={
                     'sharpe': result.sharpe,
                     'fitness': result.fitness,
-                    'alpha_id': str(result.alpha_id) if result.alpha_id else ""
+                    'alpha_id': str(result.alpha_id) if result.alpha_id else "",
+                    'metric_gate_pass': metric_pass,
+                    'correlation_review': 'PENDING'
                 } if result.success else None,
                 error=result.error_message if not result.success else None
             )
