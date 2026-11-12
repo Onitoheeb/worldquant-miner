@@ -302,7 +302,7 @@ class MiningEngine:
                     # Placeholder-only templates are scaffolds, not candidates.
                     # Stage 6 should mine concrete Step 4 research expressions only.
                     import re
-                    if re.search(r"\\b(?:OPERATOR|DATA_FIELD)\\d+\\b", template or "", re.IGNORECASE):
+                    if re.search(r"\b(?:OPERATOR|DATA_FIELD)\d+\b", template or "", re.IGNORECASE):
                         continue
 
                     # Check if this template is currently in any slot
