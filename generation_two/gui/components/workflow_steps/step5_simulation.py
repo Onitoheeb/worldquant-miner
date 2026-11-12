@@ -1108,6 +1108,8 @@ class Step5Simulation:
                 'IDLE': COLORS.get('text_secondary', '#666666'),
                 'RUNNING': COLORS.get('accent_yellow', '#ffff00'),
                 'COMPLETED': COLORS.get('accent_green', '#00ff41'),
+                'METRIC_PASS': COLORS.get('accent_green', '#00ff41'),
+                'COMPLETED_LOW_QUALITY': COLORS.get('accent_yellow', '#ffff00'),
                 'FAILED': '#ff0000'  # Red for failures
             }
             widget['status_label'].config(
