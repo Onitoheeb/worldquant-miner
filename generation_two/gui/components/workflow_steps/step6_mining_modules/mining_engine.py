@@ -32,7 +32,8 @@ class MiningEngine:
         search_strategy_manager,
         sim_counter,
         log_callback: Optional[Callable[[str], None]] = None,
-        update_slot_callback: Optional[Callable] = None
+        update_slot_callback: Optional[Callable] = None,
+        update_counter_callback: Optional[Callable] = None
     ):
         """
         Initialize mining engine
@@ -59,6 +60,7 @@ class MiningEngine:
         self.sim_counter = sim_counter
         self.log_callback = log_callback
         self.update_slot_callback = update_slot_callback
+        self.update_counter_callback = update_counter_callback
         
         self.mining_active = False
         self.stop_flag = False
@@ -315,9 +317,8 @@ class MiningEngine:
             if self.stop_flag:
                 break
             
-            # Check simulation limit
-            status = self.sim_counter.increment_count()
-            if not status['can_simulate']:
+            # Count only accepted BRAIN submissions, not selected templates.
+            if not self.sim_counter.can_simulate():
                 self._log("⚠️ Daily simulation limit reached")
                 break
             
@@ -344,19 +345,21 @@ class MiningEngine:
             if not assigned_slots:
                 continue
             
-            # Start simulation in thread
-            for slot_id in assigned_slots:
-                thread = threading.Thread(
-                    target=self._run_simulation,
-                    args=(slot_id, template, region),
-                    daemon=True
-                )
-                thread.start()
+            # GLB reserves two visual slots but represents one BRAIN submission.
+            thread = threading.Thread(
+                target=self._run_simulation,
+                args=(assigned_slots, template, region),
+                daemon=True,
+                name=f"MiningSimulation-{region}"
+            )
+            thread.start()
             
             time.sleep(0.5)  # Brief pause between submissions
     
-    def _run_simulation(self, slot_id: int, template: str, region: str):
-        """Run a single simulation with placeholder replacement"""
+    def _run_simulation(self, slot_ids, template: str, region: str):
+        """Run one BRAIN simulation and release all slots reserved for it."""
+        slot_ids = list(slot_ids) if isinstance(slot_ids, (list, tuple)) else [slot_ids]
+        slot_id = slot_ids[0]
         try:
             # Replace placeholders using Ollama selection (like Step 5)
             template_with_placeholders = template
@@ -432,7 +435,7 @@ class MiningEngine:
                                         if slot:
                                             slot.add_log(f"❌ FAILED: Still has placeholders after retry: {remaining_ops + remaining_fields}")
                                             slot.add_log(f"❌ Skipping submission - template: {template[:100]}...")
-                                        self.slot_manager.release_slot(slot_id, success=False, error=f"Placeholders not replaced: {remaining_ops + remaining_fields}")
+                                        self.slot_manager.release_slots(slot_ids, success=False, error=f"Placeholders not replaced: {remaining_ops + remaining_fields}")
                                         return
                                     else:
                                         slot = self.slot_manager.get_slot_status(slot_id)
@@ -529,6 +532,8 @@ class MiningEngine:
             if not progress_url:
                 self.slot_manager.release_slot(slot_id, success=False, error="Failed to submit")
                 return
+
+            self._record_accepted_submission()
             
             # Monitor
             def progress_callback(percent, message, api_status):
@@ -655,9 +660,8 @@ class MiningEngine:
                             template, available_fields, region
                         )
 
-        # Check if event input error (unlimited retries)
-        is_event_input_error = 'does not support event inputs' in error_message.lower()
-        max_attempts = 999 if is_event_input_error else 3
+        # Keep correction bounded so a bad template cannot pin a slot indefinitely.
+        max_attempts = 3
 
         fixed_template, fixes = self.generator.template_generator.template_validator.refeed_with_correction(
             template, error_message, region, max_attempts=max_attempts
@@ -718,6 +722,8 @@ class MiningEngine:
             progress_url = self.simulator_tester.submit_simulation(fixed_template, region, settings)
             
             if progress_url:
+                self._record_accepted_submission()
+
                 def progress_callback(percent, message, api_status):
                     self.slot_manager.update_slot_progress(slot_id, percent=percent, message=message, api_status=api_status)
                     slot = self.slot_manager.get_slot_status(slot_id)
@@ -733,6 +739,16 @@ class MiningEngine:
         
         return None
     
+    def _record_accepted_submission(self):
+        """Record an API-accepted submission and refresh the daily counter UI."""
+        status = self.sim_counter.increment_count()
+        if self.update_counter_callback:
+            self.update_counter_callback()
+        if status.get('warning_needed'):
+            self._log("⚠️ Daily simulation usage has reached 4,000 submissions.")
+        if status.get('limit_reached'):
+            self._log("⚠️ Daily simulation limit reached; new submissions will stop.")
+
     def _update_slot(self, slot_id: int, template: str, region: str, progress: float, message: str, status: str = "RUNNING"):
         """Update slot display"""
         if self.update_slot_callback:
