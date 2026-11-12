@@ -140,84 +140,140 @@ class MiningEngine:
                     self.stop_event.wait(backoff_time)
     
     def _generate_new_template_for_mining(self) -> tuple:
-        """
-        Generate a new placeholder template that's different from database
-        
-        Returns:
-            (template, region) tuple or (None, None) if failed
+        """Generate a research-led, concrete FASTEXPR candidate.
+
+        Stage 6 must not submit random placeholder trees as if they were alpha
+        hypotheses. Generate against the active BRAIN catalogue and measured
+        research memory, then require strict local compilation before storing.
         """
         try:
             region = self.search_strategy.get_next_region()
-            if not region:
+            if not region or not self.generator or not self.generator.template_generator:
                 return (None, None)
-            
-            # Use algorithmic generation (like Step 4) - generates placeholders
-            from generation_two.core.algorithmic_template_generator import AlgorithmicTemplateGenerator
-            
-            available_operators = self.generator.template_generator.operator_fetcher.operators if self.generator.template_generator.operator_fetcher else None
-            available_fields = self.generator.template_generator.get_data_fields_for_region(region)
-            
-            if not available_operators or not available_fields:
-                logger.warning(f"No operators or fields available for {region}")
-                return (None, None)
-            
-            # Generate placeholder template algorithmically
-            generator = AlgorithmicTemplateGenerator(available_operators, available_fields)
-            
-            # Read existing templates once per generation attempt. The previous
-            # implementation repeated this database query for every retry.
-            existing_templates = set(
-                self.backtest_storage.get_all_templates(region=region, limit=1000)
-            ) if self.backtest_storage else set()
 
-            # Try up to 10 times to generate a template different from database
-            max_retries = 10
-            for retry in range(max_retries):
-                template_with_placeholders = generator.generate_placeholder_expression(
-                    max_operators=5,
-                    method='random'  # Can be 'random', 'brownian', 'tree', 'linear'
-                )
-                
-                if not template_with_placeholders:
+            template_generator = self.generator.template_generator
+            operators = (
+                template_generator.operator_fetcher.operators
+                if template_generator.operator_fetcher else []
+            )
+            fields = template_generator.get_data_fields_for_region(region) or []
+            validator = getattr(template_generator, "template_validator", None)
+            ollama = getattr(template_generator, "ollama_manager", None)
+
+            if not operators or not fields or not validator or not getattr(validator, "use_ast", False):
+                self._log(f"⚠️ {region}: No strict compiler/catalogue available; skipping ungrounded candidate.")
+                return (None, None)
+
+            if not ollama or not getattr(ollama, "is_available", False):
+                self._log(f"⚠️ {region}: Research LLM unavailable; waiting for compiled Step 4 candidates.")
+                return (None, None)
+
+            research_memory = getattr(template_generator, "research_memory", None)
+            research_context = (
+                research_memory.build_evolution_prompt(region, count=1)
+                if research_memory else
+                f"Develop one distinct, testable quantitative alpha hypothesis for {region}."
+            )
+
+            # Supply actual catalogue entries; asking a model to use a catalogue
+            # without showing it one encourages invented fields/operators.
+            operator_lines = []
+            for item in operators[:100]:
+                name = str(item.get("name", "")).strip()
+                if not name:
                     continue
-                
-                # Check if different from database
-                if self.backtest_storage:
-                    if template_with_placeholders not in existing_templates:
-                        # Check duplicates
-                        is_dup, reason = self.duplicate_detector.is_duplicate(template_with_placeholders, region)
-                        if not is_dup:
-                            # Store in database
-                            from generation_two.core import template_similarity
-                            similarity_checker = template_similarity.TemplateSimilarityChecker()
-                            operators_used = list(similarity_checker.extract_operators(template_with_placeholders))
-                            fields_used = list(similarity_checker.extract_fields(template_with_placeholders))
-                            
-                            self.backtest_storage.store_template(
-                                template=template_with_placeholders,
-                                region=region,
-                                operators_used=operators_used,
-                                fields_used=fields_used
-                            )
-                            
-                            self.templates_generated_count += 1
-                            return (template_with_placeholders, region)
-                    else:
-                        logger.debug(f"Generated template already exists in database, retrying...")
-                else:
-                    # No database, just check duplicates
-                    is_dup, reason = self.duplicate_detector.is_duplicate(template_with_placeholders, region)
-                    if not is_dup:
-                        self.templates_generated_count += 1
-                        return (template_with_placeholders, region)
-            
-            logger.debug(f"Could not generate unique template after {max_retries} retries")
-            return (None, None)
-                    
+                definition = str(item.get("definition", "")).strip()
+                scope = ", ".join(str(x) for x in (item.get("scope") or []))
+                operator_lines.append(f"- {name}: {definition} [scope: {scope}]")
+            field_lines = []
+            for item in fields[:120]:
+                field_id = str(item.get("id", "")).strip()
+                if not field_id:
+                    continue
+                description = str(item.get("description", "")).strip()
+                field_lines.append(f"- {field_id}: {description[:180]}")
+
+            prompt = (
+                f"{research_context}\n\n"
+                f"ACTIVE REGION: {region}; ALPHA TYPE: REGULAR; DELAY: 1.\n"
+                "AVAILABLE OPERATORS (use only these exact names):\n"
+                + "\n".join(operator_lines)
+                + "\n\nAVAILABLE DATA FIELDS (use only these exact IDs):\n"
+                + "\n".join(field_lines)
+                + "\n\nRESEARCH TASK: Form one economically interpretable hypothesis. "
+                "Use a meaningful relationship between fields, not a random nesting "
+                "of operators. Prefer a distinct hypothesis from the historical seeds. "
+                "Return exactly one FASTEXPR expression, without markdown, explanation, "
+                "placeholders, invented identifiers, or alternatives. The expression "
+                "must be syntactically valid for the listed operator signatures."
+            )
+
+            candidate = template_generator.generate_template_from_prompt(
+                prompt, region=region, use_ollama=True
+            )
+            if not candidate:
+                return (None, None)
+
+            candidate = candidate.strip().strip("`").strip()
+            if "\n" in candidate:
+                candidate = next(
+                    (line.strip().strip("`") for line in candidate.splitlines()
+                     if line.strip() and not line.strip().startswith(("#", "//"))),
+                    ""
+                )
+            import re
+            if not candidate or re.search(r"\b(?:OPERATOR|DATA_FIELD)\d+\b", candidate, re.IGNORECASE):
+                self._log(f"⚠️ {region}: LLM returned an unresolved or empty candidate; rejecting.")
+                return (None, None)
+
+            compile_result = validator.compile_template(candidate, optimize=False)
+            if not compile_result or not compile_result.success:
+                errors = [
+                    getattr(error, "message", str(error))
+                    for error in (getattr(compile_result, "errors", None) or [])
+                ]
+                self._log(f"⚠️ {region}: Candidate failed strict compilation; rejected ({'; '.join(errors[:2])}).")
+                return (None, None)
+
+            candidate = compile_result.final_expression or candidate
+            if re.search(r"\b(?:OPERATOR|DATA_FIELD)\d+\b", candidate, re.IGNORECASE):
+                return (None, None)
+
+            if self.backtest_storage:
+                existing = set(self.backtest_storage.get_all_templates(region=region, limit=1000))
+                if candidate in existing:
+                    self._log(f"♻️ {region}: Research candidate already exists; skipping duplicate.")
+                    return (None, None)
+
+            is_duplicate, reason = self.duplicate_detector.is_duplicate(candidate, region)
+            if is_duplicate:
+                self._log(f"♻️ {region}: Research candidate rejected as duplicate ({reason}).")
+                return (None, None)
+
+            if self.backtest_storage:
+                from generation_two.core import template_similarity
+                checker = template_similarity.TemplateSimilarityChecker()
+                self.backtest_storage.store_template(
+                    template=candidate,
+                    region=region,
+                    operators_used=list(checker.extract_operators(candidate)),
+                    fields_used=list(checker.extract_fields(candidate))
+                )
+
+            self.templates_generated_count += 1
+            if research_memory:
+                research_memory.record_hypothesis(
+                    research_context, region, status="candidate_compiled",
+                    supporting_evidence=candidate
+                )
+            self._log(f"🧪 {region}: Research-led candidate compiled and stored; BRAIN simulation still required.")
+            return (candidate, region)
+
         except Exception as e:
-            logger.debug(f"Error generating template: {e}")
+            logger.warning("Research-led Stage 6 candidate generation failed: %s", e, exc_info=True)
+            self._log(f"⚠️ Research-led candidate generation failed: {str(e)[:100]}")
             return (None, None)
-    
+
     def _pick_unsimulated_template_from_db(self) -> tuple:
         """
         Pick a random unsimulated template from database
@@ -243,6 +299,12 @@ class MiningEngine:
                 # Filter out templates currently being simulated (check slot manager)
                 available_templates = []
                 for template, template_region in unsimulated:
+                    # Placeholder-only templates are scaffolds, not candidates.
+                    # Stage 6 should mine concrete Step 4 research expressions only.
+                    import re
+                    if re.search(r"\\b(?:OPERATOR|DATA_FIELD)\\d+\\b", template or "", re.IGNORECASE):
+                        continue
+
                     # Check if this template is currently in any slot
                     is_in_use = False
                     for slot_id in range(8):
