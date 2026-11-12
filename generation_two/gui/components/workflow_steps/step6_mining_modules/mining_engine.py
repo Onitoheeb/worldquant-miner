@@ -359,9 +359,6 @@ class MiningEngine:
             
             time.sleep(0.5)  # Brief pause between submissions
     
-    def _run_simulation(self, slot_ids, template: str, region: str):
-        """Run one BRAIN simulation and release all slots reserved for it."""
-
     @staticmethod
     def _meets_metric_gates(result) -> bool:
         """Apply metric gates; correlation review remains a separate qualification step."""
@@ -380,7 +377,8 @@ class MiningEngine:
         return sharpe >= 1.5 and fitness >= 1.0 and turnover <= 30.0
 
 
-        slot_ids = list(slot_ids) if isinstance(slot_ids, (list, tuple)) else [slot_ids]
+    def _run_simulation(self, slot_ids, template: str, region: str):
+        """Run one BRAIN simulation and release all slots reserved for it."""
         slot_id = slot_ids[0]
         try:
             # Replace placeholders using Ollama selection (like Step 5)
