@@ -142,12 +142,18 @@ class SlotManager:
             List of assigned slot IDs or None if no slots available
         """
         num_slots = self.get_slots_required(region)
-        slot_ids = self.find_available_slots(num_slots)
-        
-        if not slot_ids:
-            return None
-        
+        # Find and reserve slots under the same lock. Separating these operations
+        # allows two workers to claim the same idle slot between the check and write.
         with self.lock:
+            slot_ids = None
+            for start in range(self.max_slots - num_slots + 1):
+                candidate = list(range(start, start + num_slots))
+                if all(self.slots[i].status == SlotStatus.IDLE for i in candidate):
+                    slot_ids = candidate
+                    break
+            if not slot_ids:
+                return None
+
             for slot_id in slot_ids:
                 slot = self.slots[slot_id]
                 slot.status = SlotStatus.RUNNING
