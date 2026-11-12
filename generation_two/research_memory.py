@@ -285,6 +285,12 @@ class ResearchMemory:
                            prod_corr, checks_json, timestamp
                     FROM research_experiments
                     WHERE region = ? AND success = 1
+                      AND sharpe >= 1.5
+                      AND fitness >= 1.0
+                      AND CASE
+                            WHEN turnover >= 0 AND turnover <= 1 THEN turnover * 100.0
+                            ELSE turnover
+                          END <= 30.0
                     ORDER BY fitness DESC, sharpe DESC, timestamp DESC
                     LIMIT ?
                 """, (region, candidate_pool)).fetchall()
