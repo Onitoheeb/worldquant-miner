@@ -182,7 +182,11 @@ class CyberpunkGUI:
             credentials = [creds.username, creds.password]
             
             # Pass credentials directly (no temp file needed)
-            self.generator = EnhancedTemplateGeneratorV3(credentials=credentials, db_path=self.db_path)
+            self.generator = EnhancedTemplateGeneratorV3(
+                credentials=credentials,
+                db_path=self.db_path,
+                config_manager=self.config_manager
+            )
                 
         except Exception as e:
             logger.error(f"Failed to initialize generator: {e}", exc_info=True)
