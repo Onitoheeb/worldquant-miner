@@ -911,13 +911,13 @@ class Step5Simulation:
                             self._log_result(f"❌ [{template_index+1}] FAILED: {error_msg}\n")
                     else:
                         completed_count['failed'] += 1
-                        error_msg = "Failed to submit"
+                        error_msg = simulator.get_last_submission_error() or "Submission returned no progress URL; inspect simulator logs."
                         self.slot_manager.release_slots(slot_ids, success=False, error=error_msg)
                         self._update_slot_display(primary_slot_id, "FAILED", template[:40] + "...", 
                                                  f"❌ Failed to submit", 
                                                  [f"❌ Failed to submit"])
-                        self._log_to_slot(primary_slot_id, f"❌ Failed to submit")
-                        self._log_result(f"❌ [{template_index+1}] Failed to submit\n")
+                        self._log_to_slot(primary_slot_id, f"❌ SUBMISSION REJECTED: {error_msg}")
+                        self._log_result(f"❌ [{template_index+1}] SUBMISSION REJECTED: {error_msg}\n")
                     
                 except Exception as e:
                     logger.error(f"Simulation error in slot: {e}", exc_info=True)
