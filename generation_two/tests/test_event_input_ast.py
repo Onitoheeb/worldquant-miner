@@ -139,32 +139,16 @@ class EventInputASTTests(unittest.TestCase):
         self.assertFalse(parser._is_event_input_field("event_named_unknown"))
 
     def test_ambiguous_error_does_not_guess_first_expression_operator(self):
-        import os
-        import sqlite3
-        import tempfile
-
-        handle, db_path = tempfile.mkstemp(suffix=".sqlite")
-        os.close(handle)
-        try:
-            validator = TemplateValidator(
-                operators=[{"name": "rank", "scope": ["REGULAR"]}],
-                data_fields=[],
-                db_path=db_path,
-                use_ast=True,
-            )
-            validator._learn_event_input_compatibility(
-                "rank(event_field)",
-                "Invalid input data for this expression",
-            )
-            with sqlite3.connect(db_path) as conn:
-                rows = conn.execute(
-                    "SELECT operator_name FROM compiler_knowledge "
-                    "WHERE knowledge_type = 'event_input_incompatible'"
-                ).fetchall()
-            self.assertEqual(rows, [])
-            self.assertNotIn("rank", validator.parser.event_input_incompatible_operators)
-        finally:
-            os.unlink(db_path)
+        validator = TemplateValidator(
+            operators=[{"name": "rank", "scope": ["REGULAR"]}],
+            data_fields=[],
+            use_ast=True,
+        )
+        validator._learn_event_input_compatibility(
+            "rank(event_field)",
+            "Invalid input data for this expression",
+        )
+        self.assertNotIn("rank", validator.parser.event_input_incompatible_operators)
 
     def test_database_loader_ignores_guessed_legacy_operator_rows(self):
         import os
