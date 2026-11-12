@@ -650,22 +650,24 @@ class Step5Simulation:
                             
                             # Use refeed mechanism with both AST and prompt engineering
                             if self.workflow.generator.template_generator.template_validator:
-                                # Check if this is an event input error - use unlimited retries
+                                # Event-input failures are deterministic compiler constraints.
+                                # Repeating hundreds of corrections cannot make them valid.
                                 is_event_input_error = 'does not support event inputs' in error_msg.lower() or 'expects only event inputs' in error_msg.lower()
-                                max_refeed_attempts = 999 if is_event_input_error else 3  # Unlimited for event inputs
+                                max_refeed_attempts = 3
                                 
                                 fixed_template, fixes = self.workflow.generator.template_generator.template_validator.refeed_with_correction(
                                     template, error_msg, template_region, max_attempts=max_refeed_attempts
                                 )
                                 
                                 if fixed_template and fixed_template != template:
-                                    # UNLIMITED RETRY LOOP for event input errors
+                                    # At most one corrected resubmission. Repeated rejection
+                                    # is evidence to learn from, not a reason to pin a worker.
                                     current_template_for_retry = fixed_template
                                     current_error_msg = error_msg
                                     refeed_attempt = 0
-                                    max_refeed_retries = 999 if is_event_input_error else 1  # Unlimited for event inputs
-                                    
-                                    while refeed_attempt < max_refeed_retries:
+                                    max_refeed_retries = 1
+
+                                    while refeed_attempt < max_refeed_retries and not self.stop_simulation_flag:
                                         refeed_attempt += 1
                                         
                                         # Check if fixed template still has placeholders - replace them
