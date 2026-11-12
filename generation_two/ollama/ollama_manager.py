@@ -922,7 +922,9 @@ class OllamaManager:
         use_placeholder_fields: bool = True,  # V2 approach: use placeholders to avoid misspelling
         forbidden_operators: List[str] = None,  # Operators that are forbidden (already used in batch)
         use_algorithmic_generation: bool = True,  # New: Use algorithmic generation + Ollama selection
-        use_placeholder_operators: bool = True
+        use_placeholder_operators: bool = True,
+        temperature: float = 0.7,
+        max_tokens: int = 500
     ) -> Optional[str]:
         """
         Generate alpha template from hypothesis with enhanced prompt engineering and AST guidance
@@ -1246,7 +1248,13 @@ CRITICAL FASTEXPR SYNTAX RULES:
 
         # Debug: Log that we're about to call generate
         logger.debug(f"Calling Ollama generate() with prompt length: {len(user_prompt)}")
-        result = self.generate(user_prompt, system_prompt, temperature=0.7, max_tokens=300, progress_callback=progress_callback)
+        result = self.generate(
+            user_prompt,
+            system_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            progress_callback=progress_callback
+        )
         logger.debug(f"Ollama generate() returned: {result[:50] if result else 'None'}...")
         
         if result:
