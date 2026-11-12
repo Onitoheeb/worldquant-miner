@@ -2,6 +2,7 @@ import unittest
 
 from generation_two.core.fast_expr_ast import FASTEXPRParser
 from generation_two.core.template_validator import TemplateValidator
+from generation_two.core.template_generator import _cleanup_legacy_event_input_flags
 
 
 class EventInputASTTests(unittest.TestCase):
@@ -190,6 +191,57 @@ class EventInputASTTests(unittest.TestCase):
             self.assertNotIn("rank", validator.parser.event_input_incompatible_operators)
         finally:
             os.unlink(db_path)
+
+    def test_startup_cleanup_backs_up_and_clears_only_heuristic_flags(self):
+        import json
+        import os
+        import sqlite3
+        import tempfile
+
+        handle, db_path = tempfile.mkstemp(suffix=".sqlite")
+        os.close(handle)
+        backup_path = os.path.abspath(db_path) + ".event_flags_pre_cleanup.bak"
+        try:
+            with sqlite3.connect(db_path) as conn:
+                conn.execute("""
+                    CREATE TABLE field_types (
+                        field_id TEXT NOT NULL,
+                        region TEXT NOT NULL,
+                        delay INTEGER NOT NULL,
+                        is_event_input INTEGER,
+                        field_data TEXT,
+                        updated_at TEXT,
+                        UNIQUE(field_id, region, delay)
+                    )
+                """)
+                rows = [
+                    ("legacy_false", "USA", 1, 0, json.dumps({"id": "legacy_false"})),
+                    ("legacy_true", "USA", 1, 1, json.dumps({"id": "legacy_true"})),
+                    ("explicit_true", "USA", 1, 1, json.dumps({"is_event_input": True})),
+                    ("explicit_false", "USA", 1, 0, json.dumps({"is_event_input": False})),
+                ]
+                conn.executemany(
+                    "INSERT INTO field_types VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+                    rows,
+                )
+
+            cleaned = _cleanup_legacy_event_input_flags(db_path)
+            self.assertEqual(cleaned, 2)
+            self.assertTrue(os.path.isfile(backup_path))
+
+            with sqlite3.connect(db_path) as conn:
+                flags = dict(conn.execute(
+                    "SELECT field_id, is_event_input FROM field_types"
+                ).fetchall())
+            self.assertIsNone(flags["legacy_false"])
+            self.assertIsNone(flags["legacy_true"])
+            self.assertEqual(flags["explicit_true"], 1)
+            self.assertEqual(flags["explicit_false"], 0)
+        finally:
+            if os.path.exists(backup_path):
+                os.remove(backup_path)
+            if os.path.exists(db_path):
+                os.remove(db_path)
 
     def test_event_repair_does_not_guess_ts_operator_replacement(self):
         validator = TemplateValidator(
