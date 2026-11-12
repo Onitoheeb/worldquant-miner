@@ -19,6 +19,105 @@ from ..research_memory import ResearchMemory
 logger = logging.getLogger(__name__)
 
 
+def _cleanup_legacy_event_input_flags(db_path: str) -> int:
+    """Clear event-input flags that were inferred heuristically in older versions.
+
+    Only explicit bool / 0 / 1 values in the persisted raw API payload are
+    authoritative. A full SQLite backup is created before the first mutation.
+    This runs during generator initialization so it does not depend on a data
+    field refresh being triggered by the GUI.
+    """
+    import os
+    import sqlite3
+
+    if not db_path or not os.path.isfile(db_path):
+        return 0
+
+    try:
+        with sqlite3.connect(db_path, timeout=30) as conn:
+            conn.execute("PRAGMA busy_timeout = 30000")
+            table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='field_types'"
+            ).fetchone()
+            if not table:
+                return 0
+
+            rows = conn.execute(
+                """
+                SELECT field_id, region, delay, is_event_input, field_data
+                FROM field_types
+                WHERE is_event_input IS NOT NULL
+                """
+            ).fetchall()
+
+            legacy_keys = []
+            for field_id, region, delay, stored_flag, raw in rows:
+                try:
+                    metadata = json.loads(raw) if raw else {}
+                except (TypeError, ValueError):
+                    metadata = {}
+                if not isinstance(metadata, dict):
+                    metadata = {}
+
+                explicit = metadata.get("is_event_input")
+                is_explicit = (
+                    isinstance(explicit, bool)
+                    or (isinstance(explicit, int) and explicit in (0, 1))
+                )
+                if not is_explicit:
+                    legacy_keys.append((field_id, region, delay))
+
+            if not legacy_keys:
+                return 0
+
+            backup_path = os.path.abspath(db_path) + ".event_flags_pre_cleanup.bak"
+            if not os.path.exists(backup_path):
+                source = sqlite3.connect(db_path, timeout=30)
+                backup = sqlite3.connect(backup_path, timeout=30)
+                try:
+                    source.backup(backup)
+                    check = backup.execute("PRAGMA integrity_check").fetchone()
+                    if not check or check[0] != "ok":
+                        raise sqlite3.DatabaseError(
+                            f"Pre-cleanup backup integrity check failed: {check}"
+                        )
+                except Exception:
+                    try:
+                        backup.close()
+                    finally:
+                        source.close()
+                    if os.path.exists(backup_path):
+                        os.remove(backup_path)
+                    raise
+                else:
+                    backup.close()
+                    source.close()
+
+            conn.executemany(
+                """
+                UPDATE field_types
+                SET is_event_input = NULL, updated_at = CURRENT_TIMESTAMP
+                WHERE field_id = ? AND region = ? AND delay = ?
+                """,
+                legacy_keys,
+            )
+            conn.commit()
+
+        logger.warning(
+            "Cleared %s legacy heuristic event-input flags from %s. "
+            "Pre-cleanup backup: %s",
+            len(legacy_keys), os.path.abspath(db_path), backup_path
+        )
+        return len(legacy_keys)
+    except Exception:
+        logger.exception(
+            "Could not safely clean legacy event-input flags in %s; "
+            "the existing classifications were left unchanged.",
+            db_path
+        )
+        return 0
+
+
 class TemplateGenerator:
     """
     Generates alpha templates using AI/LLM
@@ -50,6 +149,9 @@ class TemplateGenerator:
         self._stored_credentials = credentials  # Store credentials in memory for re-authentication
         self.deepseek_api_key = deepseek_api_key
         self.db_path = db_path
+        # Run the backed-up legacy metadata migration immediately. It must not
+        # depend on a GUI-triggered data-field refresh.
+        _cleanup_legacy_event_input_flags(self.db_path)
         # Persistent, evidence-grounded memory shared with simulation storage.
         self.research_memory = ResearchMemory(db_path)
         # Create session with cookie persistence enabled (default, but explicit)
