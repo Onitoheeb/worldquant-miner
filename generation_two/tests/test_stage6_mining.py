@@ -26,7 +26,7 @@ def test_glb_expression_starts_one_worker_and_reserves_two_slots():
     templates = iter((f"alpha_{i}", "GLB") for i in range(8))
     engine._pick_unsimulated_template_from_db = lambda: next(templates, (None, None))
 
-    with patch("generation_two.gui.components.workflow_steps.step6_mining_modules.mining_engine.random.random", return_value=0.9, create=True), patch(
+    with patch("random.random", return_value=0.9), patch(
         "generation_two.gui.components.workflow_steps.step6_mining_modules.mining_engine.threading.Thread"
     ) as thread_class:
         engine._process_simulations()
