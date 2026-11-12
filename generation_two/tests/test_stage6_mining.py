@@ -57,3 +57,18 @@ def test_stage6_metric_gate_rejects_missing_alpha_id():
         success=True, alpha_id="", sharpe=2.4, fitness=1.5, turnover=10.0
     )
     assert not MiningEngine._meets_metric_gates(no_id)
+
+
+def test_stage6_stop_event_is_signalled_immediately():
+    engine = MiningEngine(
+        generator=None,
+        simulator_tester=None,
+        backtest_storage=None,
+        slot_manager=Mock(),
+        correlation_tracker=Mock(),
+        duplicate_detector=Mock(),
+        search_strategy_manager=Mock(),
+        sim_counter=SimpleNamespace(can_simulate=lambda: True),
+    )
+    engine.stop()
+    assert engine.stop_event.is_set()
