@@ -498,10 +498,13 @@ class SimulatorTester:
                         # A returned alpha ID plus HTTP 200 alpha details means the
                         # simulation completed. Platform warnings are review/qualification
                         # signals; they must not be misreported as a failed simulation.
-                        is_success = True
+                        has_red_errors = self._has_red_errors(checks_data)
+                        is_success = not has_red_errors
                         warning_message = ""
                         if has_warnings:
                             warning_message = "Platform warnings require review; simulation completed."
+                        if has_red_errors:
+                            warning_message = "Platform error checks were returned; simulation completed but alpha is not qualified."
                         
                         return SimulationResult(
                             template=template,
@@ -585,6 +588,20 @@ class SimulatorTester:
             timestamp=time.time()
         )
     
+    def _has_red_errors(self, checks_data: List) -> bool:
+        """Return True only for explicit platform error/failure checks."""
+        for check in checks_data or []:
+            if isinstance(check, dict):
+                status = str(check.get("status", "")).upper()
+                severity = str(check.get("severity", "")).upper()
+                if status in {"ERROR", "FAILED", "RED"} or severity == "ERROR":
+                    return True
+            elif isinstance(check, str):
+                value = check.upper()
+                if "ERROR" in value or "FAILED" in value or "RED" in value:
+                    return True
+        return False
+
     def _has_warnings_only(self, checks_data: List) -> bool:
         """
         Check if alpha has warnings but no red errors (v2 behavior: mark as red)
