@@ -34,8 +34,11 @@ def _cleanup_legacy_event_input_flags(db_path: str) -> int:
         return 0
 
     try:
-        with sqlite3.connect(db_path, timeout=30) as conn:
-            conn.execute("PRAGMA busy_timeout = 30000")
+        from contextlib import closing
+
+        with closing(sqlite3.connect(db_path, timeout=30)) as conn:
+            with conn:
+                conn.execute("PRAGMA busy_timeout = 30000")
             table = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='field_types'"
             ).fetchone()
