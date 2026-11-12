@@ -165,9 +165,15 @@ class Step6Mining:
                             slot = self.mining_slot_manager.get_slot_status(slot_id)
                             if slot.status != SlotStatus.IDLE:
                                 logs = slot.get_logs()[-50:] if len(slot.get_logs()) > 50 else slot.get_logs()
+                                display_status = slot.status.value.upper()
+                                if slot.status == SlotStatus.COMPLETED and isinstance(slot.result, dict):
+                                    if slot.result.get("metric_gate_pass") is True:
+                                        display_status = "METRIC_PASS"
+                                    elif slot.result.get("metric_gate_pass") is False:
+                                        display_status = "COMPLETED_LOW_QUALITY"
                                 self._update_mining_slot_display(
                                     slot_id,
-                                    slot.status.value.upper(),
+                                    display_status,
                                     slot.template[:40] + "..." if slot.template else "",
                                     f"Region: {slot.region}" if slot.region else "",
                                     slot.progress_percent,
