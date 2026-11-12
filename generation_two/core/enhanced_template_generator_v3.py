@@ -82,12 +82,14 @@ class EnhancedTemplateGeneratorV3:
         
         # Generation Two components
         self.self_optimizer = SelfOptimizer()
-        compiler_validator = getattr(self.template_generator, "template_validator", None)
-        candidate_validator = (
-            (lambda expression: compiler_validator.compile_template(expression, optimize=False))
-            if compiler_validator and hasattr(compiler_validator, "compile_template")
-            else None
-        )
+        # The template validator is initialized only after field metadata is
+        # loaded. Resolve it at validation time rather than capturing None here.
+        def candidate_validator(expression: str):
+            active_validator = getattr(self.template_generator, "template_validator", None)
+            if active_validator is None or not hasattr(active_validator, "compile_template"):
+                return False
+            return active_validator.compile_template(expression, optimize=False)
+
         self.evolution_engine = AlphaEvolutionEngine(candidate_validator=candidate_validator)
         self.quality_monitor = AlphaQualityMonitor()
         self.on_the_fly_tester = OnTheFlyTester(self)
