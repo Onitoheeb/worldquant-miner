@@ -340,10 +340,6 @@ class MiningEngine:
                 break
 
             # Start one worker per expression, not one worker per visual slot.
-            assigned_slots = self.slot_manager.assign_slot(template, region, 0)
-            if not assigned_slots:
-                continue
-            
             # GLB reserves two visual slots but represents one BRAIN submission.
             thread = threading.Thread(
                 target=self._run_simulation,
