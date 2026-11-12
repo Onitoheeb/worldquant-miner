@@ -82,7 +82,13 @@ class EnhancedTemplateGeneratorV3:
         
         # Generation Two components
         self.self_optimizer = SelfOptimizer()
-        self.evolution_engine = AlphaEvolutionEngine()
+        compiler_validator = getattr(self.template_generator, "template_validator", None)
+        candidate_validator = (
+            (lambda expression: compiler_validator.compile_template(expression, optimize=False))
+            if compiler_validator and hasattr(compiler_validator, "compile_template")
+            else None
+        )
+        self.evolution_engine = AlphaEvolutionEngine(candidate_validator=candidate_validator)
         self.quality_monitor = AlphaQualityMonitor()
         self.on_the_fly_tester = OnTheFlyTester(self)
         
@@ -254,7 +260,13 @@ class EnhancedTemplateGeneratorV3:
             
             # Track successful alphas
             for result in new_results:
-                if result.success and result.sharpe > 1.25:
+                turnover = float(result.turnover or 0.0)
+                if 0.0 <= turnover <= 1.0:
+                    turnover *= 100.0
+                if (result.success and result.alpha_id
+                        and result.sharpe >= 1.5
+                        and result.fitness >= 1.0
+                        and turnover <= 30.0):
                     alpha_result = AlphaResult(
                         template=result.template,
                         sharpe=result.sharpe,
