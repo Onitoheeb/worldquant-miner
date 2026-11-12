@@ -61,7 +61,7 @@ class ConfigPanel:
         section_combo = ttk.Combobox(
             selector_frame,
             textvariable=self.section_var,
-            values=["retry", "request", "simulation", "evolution", "template_generation", "recording"],
+            values=["retry", "request", "simulation", "evolution", "template_generation", "advanced_bandits", "recording"],
             state="readonly",
             width=20
         )
@@ -133,7 +133,7 @@ class ConfigPanel:
     
     def set_section(self, section_key: str):
         """Set the current section (called from outside)"""
-        if section_key in ["retry", "request", "simulation", "evolution", "template_generation", "recording"]:
+        if section_key in ["retry", "request", "simulation", "evolution", "template_generation", "advanced_bandits", "recording"]:
             self.section_var.set(section_key)
             self._load_config()
             return True
@@ -164,6 +164,8 @@ class ConfigPanel:
             
             section = self.section_var.get()
             self.config_manager.update_section(section, config_dict)
+            # Persist edits immediately; otherwise GUI changes disappear on restart.
+            self.config_manager.save()
             
             if self.update_callback:
                 self.update_callback(section, config_dict)
