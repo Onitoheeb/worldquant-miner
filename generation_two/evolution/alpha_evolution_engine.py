@@ -31,7 +31,7 @@ class AlphaEvolutionEngine:
     successful alpha expressions into potentially better ones.
     """
     
-    def __init__(self, mutation_rate: float = 0.1, crossover_rate: float = 0.7):
+    def __init__(self, mutation_rate: float = 0.1, crossover_rate: float = 0.7, candidate_validator=None):
         """
         Initialize evolution engine
         
@@ -41,6 +41,8 @@ class AlphaEvolutionEngine:
         """
         self.mutation_rate = mutation_rate
         self.crossover_rate = crossover_rate
+        # Offspring are accepted only after compiler-backed validation.
+        self.candidate_validator = candidate_validator
         self.population: List[AlphaResult] = []  # Current population of alphas
         self.fitness_scores: Dict[str, float] = {}  # {alpha_expression: fitness_score}
         
@@ -62,14 +64,29 @@ class AlphaEvolutionEngine:
             initial_alphas: List of successful alpha results
             population_size: Target population size
         """
-        if len(initial_alphas) == 0:
-            logger.warning("No initial alphas provided")
+        # Never seed evolution with failed or weak experiments. BRAIN turnover
+        # may be expressed as either a fraction or a percentage.
+        qualified = []
+        for alpha in initial_alphas:
+            try:
+                turnover = float(alpha.turnover or 0.0)
+                if 0.0 <= turnover <= 1.0:
+                    turnover *= 100.0
+                if (alpha.success and float(alpha.sharpe) >= 1.5
+                        and float(alpha.fitness) >= 1.0 and turnover <= 30.0):
+                    qualified.append(alpha)
+            except (TypeError, ValueError):
+                continue
+
+        if not qualified:
+            logger.warning("No metric-qualified initial alphas provided")
+            self.population = []
+            self.fitness_scores = {}
             return
-        
-        # Select top performers
+
         sorted_alphas = sorted(
-            initial_alphas, 
-            key=lambda a: a.sharpe * a.fitness, 
+            qualified,
+            key=lambda a: a.sharpe * a.fitness,
             reverse=True
         )
         self.population = sorted_alphas[:population_size]
@@ -356,14 +373,30 @@ class AlphaEvolutionEngine:
             # Crossover
             child = self.crossover(parents[0], parents[1])
             
-            # Mutate
+            # Mutate, then require a successful local FASTEXPR compile.
+            # Without a validator, retain a known-good parent rather than
+            # inventing an unchecked expression. BRAIN remains final authority.
             child = self.mutate(child)
-            
-            new_population.append(child)
+            if self._is_candidate_valid(child):
+                new_population.append(child)
+            else:
+                new_population.append(parents[0])
+                logger.debug("Rejected unvalidated/invalid offspring; retained parent")
         
         logger.info(f"Evolved generation: {len(new_population)} alphas")
         return new_population
     
+    def _is_candidate_valid(self, expression: str) -> bool:
+        """Return True only when a configured compiler-backed validator accepts it."""
+        if not expression or not callable(self.candidate_validator):
+            return False
+        try:
+            result = self.candidate_validator(expression)
+            return bool(getattr(result, "success", result is True))
+        except Exception as exc:
+            logger.debug("Evolution candidate validation failed: %s", exc)
+            return False
+
     def update_fitness(self, alpha_expression: str, result: AlphaResult):
         """
         Update fitness score for an alpha
