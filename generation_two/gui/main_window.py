@@ -84,8 +84,9 @@ class CyberpunkGUI:
         # Initialize system (will be set after authentication)
         self.config_manager = ConfigManager()
         self.generator = None
-        # Use one deterministic database path regardless of the process working directory.
-        self.db_path = str(Path(__file__).resolve().parents[1] / "generation_two_backtests.db")
+        # Resolve the configured SQLite database before initializing storage
+        # so every subsystem receives the same absolute path.
+        self.db_path = self._resolve_database_path()
         self.evolution_executor = None
         self.authenticated = False
         
@@ -327,11 +328,52 @@ class CyberpunkGUI:
         logging.info(f"Integrating module: {module_name}")
         # Integration logic here
     
+    def _resolve_database_path(self) -> str:
+        """Load the persisted SQLite path, falling back to the app database."""
+        default_path = Path(__file__).resolve().parents[1] / "generation_two_backtests.db"
+        config_file = Path.home() / ".generation_two" / "db_config.json"
+        try:
+            if config_file.exists():
+                with config_file.open("r", encoding="utf-8") as handle:
+                    config = json.load(handle)
+                if config.get("type", "local_sqlite") == "local_sqlite":
+                    configured_path = config.get("path")
+                    if configured_path:
+                        return str(Path(configured_path).expanduser().resolve())
+        except (OSError, ValueError, TypeError) as exc:
+            logging.warning("Could not load database configuration; using default: %s", exc)
+        return str(default_path.resolve())
+
     def _on_db_config_change(self, config: dict):
-        """Handle database configuration change"""
-        logging.info(f"Database configuration changed: {config}")
-        # Could reload database connection here
-    
+        """Apply database selection on the next launch.
+
+        Active storage handles are shared by workflow workers. Swapping them
+        while jobs are running could split writes across databases.
+        """
+        db_type = config.get("type", "local_sqlite")
+        if db_type != "local_sqlite":
+            logging.error(
+                "Database type '%s' is not supported by the active research storage; "
+                "select Local SQLite. The saved selection was not applied.",
+                db_type,
+            )
+            return
+
+        configured_path = config.get("path")
+        if not configured_path:
+            logging.error("Database configuration rejected: SQLite path is empty.")
+            return
+
+        selected_path = str(Path(configured_path).expanduser().resolve())
+        self.db_path = selected_path
+        logging.info("SQLite database selected: %s", selected_path)
+        if self.generator is not None:
+            logging.warning(
+                "Database selection saved for next launch. Restart Generation Two "
+                "before running another workflow so every storage component uses %s.",
+                selected_path,
+            )
+
     def run(self):
         """Start GUI main loop"""
         self.root.mainloop()
