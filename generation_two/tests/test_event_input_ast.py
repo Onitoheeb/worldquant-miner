@@ -197,13 +197,15 @@ class EventInputASTTests(unittest.TestCase):
         import os
         import sqlite3
         import tempfile
+        from contextlib import closing
 
         handle, db_path = tempfile.mkstemp(suffix=".sqlite")
         os.close(handle)
         backup_path = os.path.abspath(db_path) + ".event_flags_pre_cleanup.bak"
         try:
-            with sqlite3.connect(db_path) as conn:
-                conn.execute("""
+            with closing(sqlite3.connect(db_path)) as conn:
+                with conn:
+                    conn.execute("""
                     CREATE TABLE field_types (
                         field_id TEXT NOT NULL,
                         region TEXT NOT NULL,
@@ -214,22 +216,22 @@ class EventInputASTTests(unittest.TestCase):
                         UNIQUE(field_id, region, delay)
                     )
                 """)
-                rows = [
-                    ("legacy_false", "USA", 1, 0, json.dumps({"id": "legacy_false"})),
-                    ("legacy_true", "USA", 1, 1, json.dumps({"id": "legacy_true"})),
-                    ("explicit_true", "USA", 1, 1, json.dumps({"is_event_input": True})),
-                    ("explicit_false", "USA", 1, 0, json.dumps({"is_event_input": False})),
-                ]
-                conn.executemany(
-                    "INSERT INTO field_types VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
-                    rows,
-                )
+                    rows = [
+                        ("legacy_false", "USA", 1, 0, json.dumps({"id": "legacy_false"})),
+                        ("legacy_true", "USA", 1, 1, json.dumps({"id": "legacy_true"})),
+                        ("explicit_true", "USA", 1, 1, json.dumps({"is_event_input": True})),
+                        ("explicit_false", "USA", 1, 0, json.dumps({"is_event_input": False})),
+                    ]
+                    conn.executemany(
+                        "INSERT INTO field_types VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+                        rows,
+                    )
 
             cleaned = _cleanup_legacy_event_input_flags(db_path)
             self.assertEqual(cleaned, 2)
             self.assertTrue(os.path.isfile(backup_path))
 
-            with sqlite3.connect(db_path) as conn:
+            with closing(sqlite3.connect(db_path)) as conn:
                 flags = dict(conn.execute(
                     "SELECT field_id, is_event_input FROM field_types"
                 ).fetchall())
