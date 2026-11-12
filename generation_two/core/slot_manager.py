@@ -201,9 +201,15 @@ class SlotManager:
                 else:
                     alpha_id = str(alpha_id)
                 slot.alpha_id = alpha_id
+                # Distinguish BRAIN completion from passing the research gates.
+                if isinstance(result, dict) and result.get('metric_gate_pass') is False:
+                    slot.add_log(f"⚪ COMPLETED, NOT QUALIFIED - Alpha ID: {slot.alpha_id or ''}")
+                elif isinstance(result, dict) and result.get('metric_gate_pass') is True:
+                    slot.add_log(f"🟢 METRIC GATES PASSED - Alpha ID: {slot.alpha_id or ''} (correlation review pending)")
+                else:
+                    slot.add_log(f"✅ SUCCESS - Alpha ID: {slot.alpha_id or ''}")
                 # Ensure message is a string before logging
                 alpha_id_str = str(slot.alpha_id) if slot.alpha_id else ''
-                slot.add_log(f"✅ SUCCESS - Alpha ID: {alpha_id_str}")
                 if isinstance(result, dict) and 'returns' in result:
                     slot.add_log(f"   Returns: {result['returns']:.4f}, Sharpe: {result.get('sharpe', 0):.4f}")
             elif error:
