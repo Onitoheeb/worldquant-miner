@@ -135,7 +135,8 @@ class TemplateGenerator:
         deepseek_api_key: str = None,
         ollama_url: str = "http://localhost:11434",
         ollama_model: str = "qwen2.5-coder:1.5b",
-        db_path: str = "generation_two_backtests.db"
+        db_path: str = "generation_two_backtests.db",
+        config_manager=None
     ):
         """
         Initialize template generator
@@ -152,6 +153,7 @@ class TemplateGenerator:
         self._stored_credentials = credentials  # Store credentials in memory for re-authentication
         self.deepseek_api_key = deepseek_api_key
         self.db_path = db_path
+        self.config_manager = config_manager
         # Run the backed-up legacy metadata migration immediately. It must not
         # depend on a GUI-triggered data-field refresh.
         _cleanup_legacy_event_input_flags(self.db_path)
@@ -392,6 +394,16 @@ class TemplateGenerator:
         Returns:
             Alpha expression string or None
         """
+        generation_config = (
+            self.config_manager.get_section("template_generation").data
+            if self.config_manager and self.config_manager.get_section("template_generation")
+            else {}
+        )
+        use_ollama = bool(generation_config.get("use_ollama", use_ollama)) and use_ollama
+        fallback_enabled = bool(generation_config.get("fallback_enabled", True))
+        temperature = float(generation_config.get("temperature", 0.7))
+        max_tokens = int(generation_config.get("max_tokens", 500))
+
         # Feed measured BRAIN outcomes back into every research/generation cycle.
         research_context = self.research_memory.build_research_context(region)
         if research_context:
@@ -436,7 +448,9 @@ class TemplateGenerator:
                 successful_patterns=successful_patterns,
                 use_placeholder_fields=False,
                 use_placeholder_operators=False,
-                use_algorithmic_generation=False
+                use_algorithmic_generation=False,
+                temperature=temperature,
+                max_tokens=max_tokens
             )
             
             if template:
@@ -473,7 +487,9 @@ class TemplateGenerator:
                         successful_patterns=successful_patterns,
                         use_placeholder_fields=False,
                         use_placeholder_operators=False,
-                        use_algorithmic_generation=False
+                        use_algorithmic_generation=False,
+                        temperature=temperature,
+                        max_tokens=max_tokens
                     )
                 
                 if template and not self.duplicate_detector.is_duplicate(template):
@@ -485,6 +501,12 @@ class TemplateGenerator:
                     logger.warning("Generated template is still a duplicate, skipping")
                     return None
         
+        # Respect the configured fallback policy. When disabled, do not silently
+        # switch providers or emit a heuristic expression after Ollama fails.
+        if not fallback_enabled:
+            logger.warning("Ollama generation unavailable or unsuccessful and fallback is disabled.")
+            return None
+
         # Fallback to DeepSeek API
         if self.deepseek_api_key:
             return self._generate_with_deepseek(prompt, region, dataset_categories)
