@@ -64,6 +64,7 @@ class MiningEngine:
         
         self.mining_active = False
         self.stop_flag = False
+        self.stop_event = threading.Event()
         self.generated_templates_queue = []
         self.error_recovery_count = 0
         self.max_error_recovery = 10  # Max consecutive errors before pause
@@ -83,6 +84,7 @@ class MiningEngine:
         
         self.mining_active = True
         self.stop_flag = False
+        self.stop_event.clear()
         self.error_recovery_count = 0
         
         # Start main loop
@@ -95,7 +97,8 @@ class MiningEngine:
         """Stop mining engine"""
         self.mining_active = False
         self.stop_flag = True
-        self._log("⏹ Mining engine stopping...")
+        self.stop_event.set()
+        self._log("⏹ Mining engine stopping; no new simulations will be started. In-flight BRAIN jobs will finish monitoring.")
     
     def _main_loop(self):
         """Main mining loop with error recovery and long-term operation support"""
@@ -109,8 +112,8 @@ class MiningEngine:
                 
                 # Check simulation limit
                 if not self.sim_counter.can_simulate():
-                    self._log("⚠️ Daily simulation limit reached. Waiting...")
-                    time.sleep(3600)
+                    self._log("⚠️ Daily simulation limit reached. Waiting (stop remains responsive)...")
+                    self.stop_event.wait(3600)
                     continue
                 
                 # Process simulations (now handles generation internally with 20/80 logic)
@@ -119,7 +122,7 @@ class MiningEngine:
                 # Reset error recovery on success
                 self.error_recovery_count = 0
                 
-                time.sleep(1)
+                self.stop_event.wait(1)
                 
             except Exception as e:
                 self.error_recovery_count += 1
@@ -131,10 +134,10 @@ class MiningEngine:
                 
                 if self.error_recovery_count >= self.max_error_recovery:
                     self._log(f"⚠️ Too many errors, pausing for {backoff_time} seconds...")
-                    time.sleep(backoff_time)
+                    self.stop_event.wait(backoff_time)
                     self.error_recovery_count = 0
                 else:
-                    time.sleep(backoff_time)
+                    self.stop_event.wait(backoff_time)
     
     def _generate_new_template_for_mining(self) -> tuple:
         """
@@ -358,6 +361,25 @@ class MiningEngine:
     
     def _run_simulation(self, slot_ids, template: str, region: str):
         """Run one BRAIN simulation and release all slots reserved for it."""
+
+    @staticmethod
+    def _meets_metric_gates(result) -> bool:
+        """Apply metric gates; correlation review remains a separate qualification step."""
+        if not result or not getattr(result, "success", False) or not getattr(result, "alpha_id", ""):
+            return False
+        try:
+            sharpe = float(getattr(result, "sharpe", 0.0) or 0.0)
+            fitness = float(getattr(result, "fitness", 0.0) or 0.0)
+            turnover = float(getattr(result, "turnover", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return False
+        # BRAIN payloads and historical records may express turnover as either
+        # a fraction (0.10) or a percentage (10.0).
+        if 0.0 <= turnover <= 1.0:
+            turnover *= 100.0
+        return sharpe >= 1.5 and fitness >= 1.0 and turnover <= 30.0
+
+
         slot_ids = list(slot_ids) if isinstance(slot_ids, (list, tuple)) else [slot_ids]
         slot_id = slot_ids[0]
         try:
@@ -564,9 +586,13 @@ class MiningEngine:
                 self.backtest_storage.store_result(result)
             
             # Update correlation tracker
+            metric_pass = self._meets_metric_gates(result)
             if result.success and result.alpha_id:
                 self.correlation_tracker.update_template_alpha_mapping(template, str(result.alpha_id))
-                self.search_strategy.add_successful_template(template, region)
+                if metric_pass:
+                    # Only metric-qualified candidates should influence positive
+                    # examples. Simulation completion alone is not alpha quality.
+                    self.search_strategy.add_successful_template(template, region)
             
             # Release slot
             self.slot_manager.release_slots(slot_ids,
@@ -580,14 +606,33 @@ class MiningEngine:
             )
             
             # Update display
-            status = "SUCCESS" if result.success else "FAILED"
-            message = f"Sharpe: {result.sharpe:.2f}" if result.success else (result.error_message[:30] if result.error_message else "Failed")
+            status = (
+                "METRIC_PASS" if metric_pass
+                else ("COMPLETED_LOW_QUALITY" if result.success else "FAILED")
+            )
+            message = (
+                "Metric gates passed; correlation review pending" if metric_pass else
+                (f"Below metric gates: S={result.sharpe:.2f}, F={result.fitness:.2f}, T={result.turnover:.2f}"
+                 if result.success else (result.error_message[:30] if result.error_message else "Failed"))
+            )
             self._update_slot(slot_id, template, region, 100 if result.success else 0, message, status)
-            
-            # Log
+
+            # Report completed simulations separately from candidates meeting
+            # the research metric gates. Correlation review is still required.
             if result.success:
                 self.simulations_completed_count += 1
-                self._log(f"✅ {region}: Sharpe={result.sharpe:.2f}, Fitness={result.fitness:.2f} (Total: {self.simulations_completed_count})")
+                if metric_pass:
+                    self._log(
+                        f"🟢 {region}: METRIC GATES PASSED (correlation review pending) | "
+                        f"Sharpe={result.sharpe:.2f}, Fitness={result.fitness:.2f}, "
+                        f"Turnover={result.turnover:.2f} (Completed: {self.simulations_completed_count})"
+                    )
+                else:
+                    self._log(
+                        f"⚪ {region}: Simulation completed but did not meet research gates | "
+                        f"Sharpe={result.sharpe:.2f}, Fitness={result.fitness:.2f}, "
+                        f"Turnover={result.turnover:.2f}"
+                    )
             else:
                 self._log(f"❌ {region}: {result.error_message[:50] if result.error_message else 'Unknown error'}")
                 
