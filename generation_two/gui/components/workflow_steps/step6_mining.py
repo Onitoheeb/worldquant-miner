@@ -110,7 +110,8 @@ class Step6Mining:
             search_strategy_manager=self.search_strategy,
             sim_counter=self.sim_counter,
             log_callback=self._log_mining,
-            update_slot_callback=self._update_mining_slot_display
+            update_slot_callback=self._update_mining_slot_display,
+            update_counter_callback=self._update_sim_counter_display
         )
         
         # Start mining engine
